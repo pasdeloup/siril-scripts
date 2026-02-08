@@ -561,7 +561,7 @@ class PreprocessingInterface(QMainWindow):
                 try:
                     # using `link` to only get fits files
                     args = ["link", image_type, "-out=../process"]
-                    #args = ["convert", image_type, "-out=../process"]
+                    # args = ["convert", image_type, "-out=../process"]
                     # if "lights" in image_type.lower():
                     #     if not self.drizzle_status:
                     #         args.append("-debayer")
@@ -904,7 +904,7 @@ class PreprocessingInterface(QMainWindow):
             "-rgb_equal",
             "-maximize",
             "-filter-included",
-            "-weight=wfwhm",
+            # "-weight=wfwhm",
             f"-out={out}",
         ]
         if feather:
@@ -1261,6 +1261,18 @@ class PreprocessingInterface(QMainWindow):
         self.process_separately_check.setEnabled(len(self.sessions) > 1)
         stack_layout.addWidget(self.process_separately_check)
 
+        save_calibrated_lights_tooltip = "Save calibrated light frames after processing. Allows you to collect everything even if you don't create stacks immediately."
+        self.save_calibrated_lights_check = QCheckBox("Save calibrated lights")
+        self.save_calibrated_lights_check.setToolTip(save_calibrated_lights_tooltip)
+        stack_layout.addWidget(self.save_calibrated_lights_check)
+
+        paneled_mosaic_tooltip = "Create a paneled mosaic stack from individual session stacks. Automatically enables 'Process sessions separately'. No drizzle or filters applied, uses same feather settings."
+        self.paneled_mosaic_check = QCheckBox("Create paneled mosaic")
+        self.paneled_mosaic_check.setToolTip(paneled_mosaic_tooltip)
+        self.paneled_mosaic_check.setEnabled(len(self.sessions) > 1)
+        self.paneled_mosaic_check.toggled.connect(self.on_paneled_mosaic_toggled)
+        stack_layout.addWidget(self.paneled_mosaic_check)
+
         create_final_stack_tooltip = (
             "Create a final stack by combining all preprocessed lights."
         )
@@ -1293,6 +1305,8 @@ class PreprocessingInterface(QMainWindow):
                 filter_wfwhm=self.fwhm_spinbox.value(),
                 clean_up_files=self.cleanup_check.isChecked(),
                 process_separately=self.process_separately_check.isChecked(),
+                save_calibrated_lights=self.save_calibrated_lights_check.isChecked(),
+                paneled_mosaic=self.paneled_mosaic_check.isChecked(),
             )
         )
         processing_layout.addWidget(process_btn)
@@ -1368,8 +1382,18 @@ class PreprocessingInterface(QMainWindow):
     def update_process_separately_checkbox(self):
         """Update the enabled state of process_separately_check based on session count."""
         self.process_separately_check.setEnabled(len(self.sessions) > 1)
+        self.paneled_mosaic_check.setEnabled(len(self.sessions) > 1)
         if len(self.sessions) == 1:
             self.process_separately_check.setChecked(False)
+            self.paneled_mosaic_check.setChecked(False)
+
+    def on_paneled_mosaic_toggled(self):
+        """Auto-enable and lock process_separately when paneled_mosaic is checked."""
+        if self.paneled_mosaic_check.isChecked():
+            self.process_separately_check.setChecked(True)
+            self.process_separately_check.setEnabled(False)
+        else:
+            self.process_separately_check.setEnabled(len(self.sessions) > 1)
 
     def save_presets(self):
         """Save current UI settings and session data to a preset file"""
@@ -1387,6 +1411,8 @@ class PreprocessingInterface(QMainWindow):
             "process_separately": self.process_separately_check.isChecked(),
             "create_final_stack": self.create_final_stack_check.isChecked(),
             "mono": self.mono_check.isChecked(),
+            "save_calibrated_lights": self.save_calibrated_lights_check.isChecked(),
+            "paneled_mosaic": self.paneled_mosaic_check.isChecked(),
             # Add session information
             "sessions": [],
         }
@@ -1462,6 +1488,12 @@ class PreprocessingInterface(QMainWindow):
                     presets.get("create_final_stack", True)
                 )
                 self.mono_check.setChecked(presets.get("mono", False))
+                self.save_calibrated_lights_check.setChecked(
+                    presets.get("save_calibrated_lights", False)
+                )
+                self.paneled_mosaic_check.setChecked(
+                    presets.get("paneled_mosaic", False)
+                )
 
                 # Load session data
                 sessions_data = presets.get("sessions", [])
@@ -1512,6 +1544,8 @@ class PreprocessingInterface(QMainWindow):
         filter_wfwhm: float = UI_DEFAULTS["filter_wfwhm"],
         clean_up_files: bool = False,
         process_separately: bool = False,
+        save_calibrated_lights: bool = False,
+        paneled_mosaic: bool = False,
     ):
         self.siril.log(
             f"Running script version {VERSION} with arguments:\n"
@@ -1525,6 +1559,8 @@ class PreprocessingInterface(QMainWindow):
             f"filter_wfwhm={filter_wfwhm}\n"
             f"clean_up_files={clean_up_files}\n"
             f"process_separately={process_separately}\n"
+            f"save_calibrated_lights={save_calibrated_lights}\n"
+            f"paneled_mosaic={paneled_mosaic}\n"
             f"build={VERSION}-b01",
             LogColor.BLUE,
         )
@@ -1537,8 +1573,9 @@ class PreprocessingInterface(QMainWindow):
             or os.path.exists("collected_lights")
             or os.path.exists("mono_stacks")
             or os.path.exists("individual_stacks")
+            or os.path.exists("paneled_mosaic_process")
         ):
-            msg = """One or more old processing directories found (sessions, process, collected_lights, mono_stacks, individual_stacks). 
+            msg = """One or more old processing directories found (sessions, process, collected_lights, mono_stacks, individual_stacks, paneled_mosaic_process). 
                 \nDo you want to delete them and start fresh?
                 \nNote: There is no way to recover this data if you choose 'Yes'."""
             answer = QMessageBox.question(
@@ -1568,6 +1605,11 @@ class PreprocessingInterface(QMainWindow):
                     shutil.rmtree("individual_stacks")
                     self.siril.log(
                         "Cleaned up old individual_stacks directory", LogColor.BLUE
+                    )
+                if os.path.exists("paneled_mosaic_process"):
+                    shutil.rmtree("paneled_mosaic_process")
+                    self.siril.log(
+                        "Cleaned up old paneled_mosaic_process directory", LogColor.BLUE
                     )
             else:
                 self.siril.log(
@@ -1631,24 +1673,34 @@ class PreprocessingInterface(QMainWindow):
 
             # Current directory where files are located
             current_dir = os.path.join(self.current_working_directory, "process")
-            # Mitigate bug: If collected_lights doesn't exist, create it here because sometimes it doesn't get created earlier
-            os.makedirs(self.collected_lights_dir, exist_ok=True)
-            # Find and move all files starting with 'pp_lights'
-            for file_name in os.listdir(current_dir):
-                if file_name.startswith("pp_lights") and file_name.endswith(
-                    self.fits_extension
-                ):
-                    src_path = os.path.join(current_dir, file_name)
 
-                    # Prepend session_name to the filename
-                    new_file_name = f"{session_name}_{file_name}"
-                    dest_path = os.path.join(self.collected_lights_dir, new_file_name)
+            # Only save calibrated lights if requested
+            if save_calibrated_lights:
+                # Mitigate bug: If collected_lights doesn't exist, create it here because sometimes it doesn't get created earlier
+                os.makedirs(self.collected_lights_dir, exist_ok=True)
+                # Find and move all files starting with 'pp_lights'
+                for file_name in os.listdir(current_dir):
+                    if file_name.startswith("pp_lights") and file_name.endswith(
+                        self.fits_extension
+                    ):
+                        src_path = os.path.join(current_dir, file_name)
 
-                    shutil.copy2(src_path, dest_path)
-                    self.siril.log(
-                        f"Moved {file_name} to {self.collected_lights_dir} as {new_file_name}",
-                        LogColor.BLUE,
-                    )
+                        # Prepend session_name to the filename
+                        new_file_name = f"{session_name}_{file_name}"
+                        dest_path = os.path.join(
+                            self.collected_lights_dir, new_file_name
+                        )
+
+                        shutil.copy2(src_path, dest_path)
+                        self.siril.log(
+                            f"Moved {file_name} to {self.collected_lights_dir} as {new_file_name}",
+                            LogColor.BLUE,
+                        )
+            else:
+                self.siril.log(
+                    "Skipping save of calibrated lights (save_calibrated_lights is unchecked)",
+                    LogColor.BLUE,
+                )
 
             # Process separately if requested or mono is selected
             if process_separately or self.mono_check.isChecked():
@@ -1860,6 +1912,7 @@ class PreprocessingInterface(QMainWindow):
         if (
             not self.mono_check.isChecked()
             and self.create_final_stack_check.isChecked()
+            and save_calibrated_lights
         ):
             self.siril.cmd("cd", f'"{self.collected_lights_dir}"')
             self.current_working_directory = self.siril.get_siril_wd()
@@ -1952,8 +2005,230 @@ class PreprocessingInterface(QMainWindow):
             self.current_working_directory = self.siril.get_siril_wd()
             file_name = self.save_image("_og")
             self.load_image(image_name=file_name)
+        elif (
+            not self.mono_check.isChecked()
+            and self.create_final_stack_check.isChecked()
+            and self.process_separately_check.isChecked()
+        ):
+            self.siril.log(
+                "Final stack creation skipped due to process separately option",
+                LogColor.BLUE,
+            )
         else:
             self.siril.log("Final stack creation skipped", LogColor.BLUE)
+
+        # Paneled mosaic workflow
+        if paneled_mosaic and process_separately:
+            self.siril.log("Starting paneled mosaic creation...", LogColor.BLUE)
+            individual_stacks_dir = os.path.join(
+                self.home_directory, "individual_stacks"
+            )
+            paneled_mosaic_process_dir = os.path.join(
+                self.current_working_directory, "paneled_mosaic_process"
+            )
+            os.makedirs(paneled_mosaic_process_dir, exist_ok=True)
+
+            # Check if individual_stacks directory exists with stacks
+            if os.path.exists(individual_stacks_dir):
+                self.siril.log(
+                    f"Looking for individual stacks in: {individual_stacks_dir}",
+                    LogColor.BLUE,
+                )
+                # Look for individual stack files (not prefixed with "mono_" unless mono is checked)
+                search_prefix = "mono_" if self.mono_check.isChecked() else ""
+                fits_files = [
+                    fname
+                    for fname in os.listdir(individual_stacks_dir)
+                    if fname.endswith(self.fits_extension)
+                    and fname.startswith(search_prefix)
+                ]
+
+                self.siril.log(
+                    f"Found {len(fits_files)} individual stack files: {fits_files}",
+                    LogColor.BLUE,
+                )
+
+                if len(fits_files) > 1:
+                    # Copy individual stacks to the paneled_mosaic_process directory
+                    self.siril.log(
+                        f"Copying {len(fits_files)} stacks to paneled_mosaic_process...",
+                        LogColor.BLUE,
+                    )
+                    for fname in fits_files:
+                        src = os.path.join(individual_stacks_dir, fname)
+                        dst = os.path.join(paneled_mosaic_process_dir, fname)
+                        try:
+                            shutil.copy2(src, dst)
+                            self.siril.log(f"Copied {fname}", LogColor.BLUE)
+                        except Exception as e:
+                            self.siril.log(f"Failed to copy {fname}: {e}", LogColor.RED)
+
+                    # Change directory to paneled_mosaic_process
+                    self.siril.cmd("cd", f'"{paneled_mosaic_process_dir}"')
+                    self.current_working_directory = self.siril.get_siril_wd()
+
+                    # Create a lights folder for conversion
+                    lights_dir = os.path.join(paneled_mosaic_process_dir, "lights")
+                    os.makedirs(lights_dir, exist_ok=True)
+                    self.siril.log(f"Moving files to {lights_dir}...", LogColor.BLUE)
+                    for fname in fits_files:
+                        src = os.path.join(paneled_mosaic_process_dir, fname)
+                        dst = os.path.join(lights_dir, fname)
+                        try:
+                            if os.path.exists(src):
+                                shutil.move(src, dst)
+                                self.siril.log(
+                                    f"Moved {fname} to lights/", LogColor.BLUE
+                                )
+                            else:
+                                self.siril.log(
+                                    f"Source file not found: {src}", LogColor.SALMON
+                                )
+                        except Exception as e:
+                            self.siril.log(f"Failed to move {fname}: {e}", LogColor.RED)
+
+                    # Verify files exist in lights directory
+                    lights_files = (
+                        os.listdir(lights_dir) if os.path.exists(lights_dir) else []
+                    )
+                    self.siril.log(
+                        f"Lights directory now contains: {lights_files}",
+                        LogColor.BLUE,
+                    )
+
+                    # Link FITS files to create sequence (cd into lights directory first)
+                    self.siril.cmd("cd", f'"{lights_dir}"')
+                    args = ["link", "lights"]
+                    self.siril.log(" ".join(str(arg) for arg in args), LogColor.GREEN)
+                    self.siril.cmd(*args)
+
+                    # All sequence processing happens in the lights directory
+                    seq_name = "lights_"
+
+                    # Plate solve the sequence (without filters)
+                    self.siril.log(
+                        f"Plate solving paneled mosaic sequence {seq_name}...",
+                        LogColor.BLUE,
+                    )
+                    try:
+                        self.seq_plate_solve(seq_name=seq_name)
+                        # self.siril.cmd(
+                        #     "seqplatesolve",
+                        #     seq_name,
+                        # )
+                        self.siril.log(f"Plate solved {seq_name}", LogColor.GREEN)
+                        plate_solve_ok = True
+                    except (s.DataError, s.CommandError, s.SirilError) as e:
+                        self.siril.log(
+                            f"Plate solve failed for paneled mosaic: {e}",
+                            LogColor.RED,
+                        )
+                        plate_solve_ok = False
+
+                    if plate_solve_ok:
+                        # Apply registration (no drizzle, no filters)
+                        try:
+                            self.siril.cmd(
+                                "seqapplyreg",
+                                seq_name,
+                                "-kernel=square",
+                                "-framing=max",
+                            )
+                            self.siril.log(
+                                f"Applied registration to {seq_name}",
+                                LogColor.GREEN,
+                            )
+                            seq_name = f"r_{seq_name}"
+                        except (s.DataError, s.CommandError, s.SirilError) as e:
+                            self.siril.log(
+                                f"Could not apply registration: {e}", LogColor.RED
+                            )
+                    else:
+                        # TODO: Test this path
+                        # Regular registration if plate solve failed
+                        try:
+                            self.siril.cmd("register", seq_name, "-2pass")
+                            self.siril.cmd("seqapplyreg", seq_name)
+                            seq_name = f"r_{seq_name}"
+                        except (s.DataError, s.CommandError, s.SirilError) as e:
+                            self.siril.log(
+                                f"Could not apply regular registration: {e}",
+                                LogColor.RED,
+                            )
+
+                    # Stack with overlap_norm=True (happens in lights directory)
+                    # stack r_lights_  rej none -norm=addscale -output_norm -overlap_norm -rgb_equal -maximize -filter-included -weight=wfwhm -out=paneled_mosaic_stacked -feather=70
+                    self.seq_stack(
+                        seq_name=seq_name,
+                        feather=feather,
+                        feather_amount=feather_amount,
+                        rejection=False,
+                        output_name="paneled_mosaic_stacked",
+                        overlap_norm=True,
+                    )
+
+                    # self.siril.cmd(
+                    #     "stack",
+                    #     f"{seq_name}",
+                    #     " rej none",
+                    #     "-norm=addscale",
+                    #     "-output_norm",
+                    #     "-overlap_norm",
+                    #     "-rgb_equal",
+                    #     "-maximize",
+                    #     "-filter-included",
+                    #     f"-feather={feather_amount}",
+                    #     "-out=paneled_mosaic_stacked",
+                    # )
+
+                    # # Return to paneled_mosaic_process directory
+                    # self.siril.cmd("cd", "..")
+
+                    # Move final stack to home directory
+                    try:
+                        # Stacked file is in the lights subdirectory
+                        paneled_mosaic_file = os.path.join(
+                            lights_dir,
+                            f"paneled_mosaic_stacked{self.fits_extension}",
+                        )
+                        if os.path.exists(paneled_mosaic_file):
+                            final_location = os.path.join(
+                                self.home_directory,
+                                f"paneled_mosaic_final{self.fits_extension}",
+                            )
+                            self.load_image(image_name="paneled_mosaic_stacked")
+                            print(rf"Home directory: {self.home_directory}")
+                            # home_dir = f"{self.home_directory}"
+                            self.siril.cmd("cd", f'"{self.home_directory}"')
+                            self.save_image("paneled_mosaic_final")
+                            self.siril.log(
+                                f"Paneled mosaic final stack saved to {final_location}",
+                                LogColor.GREEN,
+                            )
+                        else:
+                            self.siril.log(
+                                f"Could not find paneled_mosaic_stacked{self.fits_extension}",
+                                LogColor.RED,
+                            )
+                    except Exception as e:
+                        self.siril.log(
+                            f"Error saving paneled mosaic final stack: {e}",
+                            LogColor.RED,
+                        )
+
+                    # self.siril.cmd("cd", self.current_working_directory)
+
+                else:
+                    self.siril.log(
+                        "Not enough individual stacks for paneled mosaic (need at least 2)",
+                        LogColor.SALMON,
+                    )
+            else:
+                self.siril.log(
+                    f"Individual stacks directory not found, skipping paneled mosaic",
+                    LogColor.SALMON,
+                )
+
         # Delete the blank sessions dir
         if clean_up_files:
             shutil.rmtree(os.path.join(self.current_working_directory, "sessions"))
@@ -1988,6 +2263,23 @@ class PreprocessingInterface(QMainWindow):
                     )
                 )
                 self.siril.log("Cleaned up mono_process directory", LogColor.BLUE)
+
+            # Clean up paneled_mosaic_process but preserve individual_stacks
+            paneled_mosaic_process_dir = os.path.join(
+                self.current_working_directory, "paneled_mosaic_process"
+            )
+            if os.path.exists(paneled_mosaic_process_dir):
+                try:
+                    shutil.rmtree(paneled_mosaic_process_dir)
+                    self.siril.log(
+                        "Cleaned up paneled_mosaic_process directory", LogColor.BLUE
+                    )
+                except Exception as e:
+                    self.siril.log(
+                        f"Could not clean up paneled_mosaic_process: {e}",
+                        LogColor.SALMON,
+                    )
+
             try:
                 shutil.rmtree(os.path.join(self.current_working_directory, "cache"))
                 shutil.rmtree(os.path.join(self.current_working_directory, "drizztmp"))
