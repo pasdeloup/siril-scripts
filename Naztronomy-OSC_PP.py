@@ -867,6 +867,15 @@ class PreprocessingInterface(QMainWindow):
             )
         ):
             cmd_args.append("-flat=flats_stacked")
+
+        # apply bias to lights because it does magic
+        if os.path.exists(
+            os.path.join(
+                self.current_working_directory,
+                f"process/biases_stacked{self.fits_extension}",
+            )
+        ):
+            cmd_args.append("-bias=biases_stacked")
         cmd_args.extend(["-cfa", "-equalize_cfa"])
         # cmd_args = [
         #     "calibrate",
