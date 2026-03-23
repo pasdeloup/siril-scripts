@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 
 Naztronomy - OSC Image Preprocessing script
-Version: 2.0.0
+Version: 2.0.1
 =====================================
 
 The author of this script is Nazmus Nasir (Naztronomy) and can be reached at:
@@ -27,7 +27,11 @@ allows you to choose files from any folder and drive and they will all be consol
 
 """
 CHANGELOG:
-2.0.1 - Threading on Black Frames check
+2.0.1 - Single/Multi/Paneled mosaic workflows 
+      - Allow stacking multiple targets at the same time (without combining them at the end)
+      - Single target session can combine everything at once or do it by session/panel
+      - Paneled mosaic will crop down to reference frame size to avoid noisy edges and speed up processing
+      - Paneled mosaic automatically applies overlap normalization 
       - Final Stack Checkbox
       - Delay between stacks to reduce IO errors
 2.0.0 - pyqt6 support
@@ -61,6 +65,8 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
+    QRadioButton,
+    QButtonGroup,
     QTabWidget,
     QGroupBox,
     QFileDialog,
@@ -84,7 +90,7 @@ import threading
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
 VERSION = "2.0.1"
-BUILD = "20260116"
+BUILD = "20260323"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "Naztronomy.com"
 YOUTUBE = "YouTube.com/Naztronomy"
@@ -94,6 +100,8 @@ UI_DEFAULTS = {
     "feather_amount": 20,
     "filter_round": 3.0,
     "filter_wfwhm": 3.0,
+    "filter_stars": 3.0,
+    "filter_bkg": 3.0,
     "drizzle_amount": 1.0,
     "pixel_fraction": 1.0,
     "max_files_per_batch": 2000,
@@ -522,6 +530,7 @@ class PreprocessingInterface(QMainWindow):
         directory = os.path.join(self.current_working_directory, image_type)
         self.siril.log(f'Converting files in "{directory}"', LogColor.BLUE)
         if os.path.isdir(directory):
+            print(f"Found directory for {image_type}: {directory}")
             self.siril.cmd("cd", f'"{directory}"')
             file_count = len(
                 [
@@ -621,17 +630,51 @@ class PreprocessingInterface(QMainWindow):
         self.siril.log("Background extracted from Sequence", LogColor.GREEN)
 
     def seq_apply_reg(
-        self, seq_name, drizzle_amount, pixel_fraction, filter_wfwhm=3, filter_round=3
+        self,
+        seq_name,
+        drizzle_amount,
+        pixel_fraction,
+        filter_wfwhm=3,
+        filter_round=3,
+        filter_stars=3,
+        filter_bkg=3,
+        use_filter_round=False,
+        use_filter_wfwhm=False,
+        use_filter_stars=False,
+        use_filter_bkg=False,
     ):
         """Apply Existing Registration to the sequence."""
         cmd_args = [
             "seqapplyreg",
             seq_name,
-            f"-filter-round={filter_round}k",
-            f"-filter-wfwhm={filter_wfwhm}k",
             "-kernel=square",
-            "-framing=max",
         ]
+
+        if use_filter_round:
+            if self.roundness_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-round={filter_round}k")
+            else:
+                cmd_args.append(f"-filter-round={int(filter_round)}%")
+        if use_filter_wfwhm:
+            if self.fwhm_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-wfwhm={filter_wfwhm}k")
+            else:
+                cmd_args.append(f"-filter-wfwhm={int(filter_wfwhm)}%")
+        if use_filter_stars:
+            if self.stars_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-nbstars={filter_stars}k")
+            else:
+                cmd_args.append(f"-filter-nbstars={int(filter_stars)}%")
+        if use_filter_bkg:
+            if self.bkg_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-bkg={filter_bkg}k")
+            else:
+                cmd_args.append(f"-filter-bkg={int(filter_bkg)}%")
+
+        # If not doing a paneled mosaic, use max framing, otherwise crop down to reference frame so edges don't have ugly noise
+        if not self.paneled_mosaic_radio.isChecked():
+            cmd_args.append("-framing=max")
+
         if self.drizzle_status:
             cmd_args.extend(
                 ["-drizzle", f"-scale={drizzle_amount}", f"-pixfrac={pixel_fraction}"]
@@ -860,6 +903,8 @@ class PreprocessingInterface(QMainWindow):
             )
         ):
             cmd_args.append("-dark=darks_stacked")
+            # Cosmetic Correction with sigma clipping 3 low and 3 high
+            cmd_args.append("-cc=dark 3 3")
         if os.path.exists(
             os.path.join(
                 self.current_working_directory,
@@ -1195,11 +1240,11 @@ class PreprocessingInterface(QMainWindow):
         reg_group = QGroupBox("Optional Filter Settings")
         reg_layout = QVBoxLayout()
 
-        # Registration controls
+        # Roundness filter
         roundness_label_tooltip = "Filters images by star roundness, calculated using the second moments of detected stars. \nA lower roundness value applies a stricter filter, keeping only frames with well-defined, circular stars. Higher roundness values allow more variation in star shapes."
         roundness_layout = QHBoxLayout()
-        roundness_label = QLabel("Filter Roundness:")
-        roundness_label.setToolTip(roundness_label_tooltip)
+        self.roundness_check = QCheckBox("Filter Roundness:")
+        self.roundness_check.setToolTip(roundness_label_tooltip)
         self.roundness_spinbox = QDoubleSpinBox()
         self.roundness_spinbox.setRange(1, 4)
         self.roundness_spinbox.setSingleStep(0.1)
@@ -1207,30 +1252,116 @@ class PreprocessingInterface(QMainWindow):
         self.roundness_spinbox.setDecimals(1)
         self.roundness_spinbox.setMinimumWidth(80)
         self.roundness_spinbox.setSuffix(" σ")
+        self.roundness_spinbox.setEnabled(False)
         self.roundness_spinbox.setToolTip(roundness_label_tooltip)
-        roundness_layout.addWidget(roundness_label)
+        self.roundness_mode_combo = QComboBox()
+        self.roundness_mode_combo.addItems(["σ", "%"])
+        self.roundness_mode_combo.setFixedWidth(65)
+        self.roundness_mode_combo.setEnabled(False)
+        self.roundness_check.toggled.connect(self.roundness_spinbox.setEnabled)
+        self.roundness_check.toggled.connect(self.roundness_mode_combo.setEnabled)
+        self.roundness_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.roundness_mode_combo, self.roundness_spinbox
+            )
+        )
+        roundness_layout.addWidget(self.roundness_check)
         roundness_layout.addWidget(self.roundness_spinbox)
+        roundness_layout.addWidget(self.roundness_mode_combo)
         reg_layout.addLayout(roundness_layout)
-
-        reg_group.setLayout(reg_layout)
-        processing_layout.addWidget(reg_group)
 
         # FWHM filter
         fwhm_label_tooltip = "Filters images by weighted Full Width at Half Maximum (FWHM), calculated using star sharpness. \nA lower sigma value applies a stricter filter, keeping only frames close to the median FWHM. Higher sigma allows more variation."
         fwhm_layout = QHBoxLayout()
-        fwhm_label = QLabel("Filter FWHM:")
+        self.fwhm_check = QCheckBox("Filter FWHM:")
+        self.fwhm_check.setToolTip(fwhm_label_tooltip)
         self.fwhm_spinbox = QDoubleSpinBox()
-        fwhm_label.setToolTip(fwhm_label_tooltip)
         self.fwhm_spinbox.setRange(1, 4)
         self.fwhm_spinbox.setSingleStep(0.1)
         self.fwhm_spinbox.setValue(UI_DEFAULTS["filter_wfwhm"])
         self.fwhm_spinbox.setDecimals(1)
         self.fwhm_spinbox.setMinimumWidth(80)
         self.fwhm_spinbox.setSuffix(" σ")
+        self.fwhm_spinbox.setEnabled(False)
         self.fwhm_spinbox.setToolTip(fwhm_label_tooltip)
-        fwhm_layout.addWidget(fwhm_label)
+        self.fwhm_mode_combo = QComboBox()
+        self.fwhm_mode_combo.addItems(["σ", "%"])
+        self.fwhm_mode_combo.setFixedWidth(65)
+        self.fwhm_mode_combo.setEnabled(False)
+        self.fwhm_check.toggled.connect(self.fwhm_spinbox.setEnabled)
+        self.fwhm_check.toggled.connect(self.fwhm_mode_combo.setEnabled)
+        self.fwhm_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.fwhm_mode_combo, self.fwhm_spinbox
+            )
+        )
+        fwhm_layout.addWidget(self.fwhm_check)
         fwhm_layout.addWidget(self.fwhm_spinbox)
+        fwhm_layout.addWidget(self.fwhm_mode_combo)
         reg_layout.addLayout(fwhm_layout)
+
+        # Star count filter
+        stars_label_tooltip = "Filters images by star count. Frames with significantly fewer stars than the median are excluded. \nA lower sigma value applies a stricter filter. Higher sigma allows more variation."
+        stars_layout = QHBoxLayout()
+        self.stars_check = QCheckBox("Filter Star Count:")
+        self.stars_check.setToolTip(stars_label_tooltip)
+        self.stars_spinbox = QDoubleSpinBox()
+        self.stars_spinbox.setRange(1, 4)
+        self.stars_spinbox.setSingleStep(0.1)
+        self.stars_spinbox.setValue(UI_DEFAULTS["filter_stars"])
+        self.stars_spinbox.setDecimals(1)
+        self.stars_spinbox.setMinimumWidth(80)
+        self.stars_spinbox.setSuffix(" σ")
+        self.stars_spinbox.setEnabled(False)
+        self.stars_spinbox.setToolTip(stars_label_tooltip)
+        self.stars_mode_combo = QComboBox()
+        self.stars_mode_combo.addItems(["σ", "%"])
+        self.stars_mode_combo.setFixedWidth(65)
+        self.stars_mode_combo.setEnabled(False)
+        self.stars_check.toggled.connect(self.stars_spinbox.setEnabled)
+        self.stars_check.toggled.connect(self.stars_mode_combo.setEnabled)
+        self.stars_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.stars_mode_combo, self.stars_spinbox
+            )
+        )
+        stars_layout.addWidget(self.stars_check)
+        stars_layout.addWidget(self.stars_spinbox)
+        stars_layout.addWidget(self.stars_mode_combo)
+        reg_layout.addLayout(stars_layout)
+
+        # Background filter
+        bkg_label_tooltip = "Filters images by background level. Frames with a significantly higher background than the median are excluded. \nA lower sigma value applies a stricter filter. Higher sigma allows more variation."
+        bkg_layout = QHBoxLayout()
+        self.bkg_check = QCheckBox("Filter Background:")
+        self.bkg_check.setToolTip(bkg_label_tooltip)
+        self.bkg_spinbox = QDoubleSpinBox()
+        self.bkg_spinbox.setRange(1, 4)
+        self.bkg_spinbox.setSingleStep(0.1)
+        self.bkg_spinbox.setValue(UI_DEFAULTS["filter_bkg"])
+        self.bkg_spinbox.setDecimals(1)
+        self.bkg_spinbox.setMinimumWidth(80)
+        self.bkg_spinbox.setSuffix(" σ")
+        self.bkg_spinbox.setEnabled(False)
+        self.bkg_spinbox.setToolTip(bkg_label_tooltip)
+        self.bkg_mode_combo = QComboBox()
+        self.bkg_mode_combo.addItems(["σ", "%"])
+        self.bkg_mode_combo.setFixedWidth(65)
+        self.bkg_mode_combo.setEnabled(False)
+        self.bkg_check.toggled.connect(self.bkg_spinbox.setEnabled)
+        self.bkg_check.toggled.connect(self.bkg_mode_combo.setEnabled)
+        self.bkg_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.bkg_mode_combo, self.bkg_spinbox
+            )
+        )
+        bkg_layout.addWidget(self.bkg_check)
+        bkg_layout.addWidget(self.bkg_spinbox)
+        bkg_layout.addWidget(self.bkg_mode_combo)
+        reg_layout.addLayout(bkg_layout)
+
+        reg_group.setLayout(reg_layout)
+        processing_layout.addWidget(reg_group)
 
         # Stacking settings
         stack_group = QGroupBox("Stacking Settings")
@@ -1263,39 +1394,64 @@ class PreprocessingInterface(QMainWindow):
         stack_layout.addWidget(self.cleanup_check)
 
         self.feather_checkbox.toggled.connect(self.feather_amount_spinbox.setEnabled)
-        process_separately_tooltip = "Process each session as a separate stack in addition to the merged stack. Individual stacks will be saved in a 'individual_stacks' directory."
-
-        self.process_separately_check = QCheckBox("Process sessions separately")
-        self.process_separately_check.setToolTip(process_separately_tooltip)
-        self.process_separately_check.setEnabled(len(self.sessions) > 1)
-        stack_layout.addWidget(self.process_separately_check)
 
         save_calibrated_lights_tooltip = "Save calibrated light frames after processing. Allows you to collect everything even if you don't create stacks immediately."
         self.save_calibrated_lights_check = QCheckBox("Save calibrated lights")
         self.save_calibrated_lights_check.setToolTip(save_calibrated_lights_tooltip)
         stack_layout.addWidget(self.save_calibrated_lights_check)
 
-        paneled_mosaic_tooltip = "Create a paneled mosaic stack from individual session stacks. Automatically enables 'Process sessions separately'. No drizzle or filters applied, uses same feather settings."
-        self.paneled_mosaic_check = QCheckBox("Create paneled mosaic")
-        self.paneled_mosaic_check.setToolTip(paneled_mosaic_tooltip)
-        self.paneled_mosaic_check.setEnabled(len(self.sessions) > 1)
-        self.paneled_mosaic_check.toggled.connect(self.on_paneled_mosaic_toggled)
-        stack_layout.addWidget(self.paneled_mosaic_check)
+        # Target mode radio buttons
+        target_mode_box = QGroupBox("Target Mode")
+        target_mode_layout = QVBoxLayout()
 
-        create_final_stack_tooltip = (
-            "Create a final stack by combining all preprocessed lights."
+        self.single_target_radio = QRadioButton("Single target")
+        self.single_target_radio.setToolTip(
+            "All sessions are of the same target and will be combined into a single final stack."
         )
+        self.single_target_radio.setChecked(True)
+
+        self.multi_target_radio = QRadioButton(
+            "Multi target (Do not combine into final stack)"
+        )
+        self.multi_target_radio.setToolTip(
+            "Each session is a different target. Sessions are stacked individually — no combined stack is produced."
+        )
+        self.multi_target_radio.setEnabled(len(self.sessions) > 1)
+
+        self.paneled_mosaic_radio = QRadioButton("Paneled mosaic")
+        self.paneled_mosaic_radio.setToolTip(
+            "Sessions are mosaic panels of the same target. Each session is stacked individually, then stitched into a mosaic. No drizzle or filters applied during stitching."
+        )
+        self.paneled_mosaic_radio.setEnabled(len(self.sessions) > 1)
+
+        self.mono_radio = QRadioButton("Mono (Experimental)")
+        self.mono_radio.setToolTip(
+            "Experimental: Process images as monochrome (no debayering). Use only for monochrome cameras or special processing needs. Sessions are processed individually — no combined stack is produced."
+        )
+        # Alias so all existing self.mono_check.isChecked() references keep working
+        self.mono_check = self.mono_radio
+
+        self.target_mode_button_group = QButtonGroup()
+        self.target_mode_button_group.addButton(self.single_target_radio)
+        self.target_mode_button_group.addButton(self.multi_target_radio)
+        self.target_mode_button_group.addButton(self.paneled_mosaic_radio)
+        self.target_mode_button_group.addButton(self.mono_radio)
+
+        target_mode_layout.addWidget(self.single_target_radio)
+        target_mode_layout.addWidget(self.multi_target_radio)
+        target_mode_layout.addWidget(self.paneled_mosaic_radio)
+        target_mode_layout.addWidget(self.mono_radio)
+        target_mode_box.setLayout(target_mode_layout)
+        stack_layout.addWidget(target_mode_box)
+
+        self.target_mode_button_group.buttonToggled.connect(self.on_target_mode_changed)
+
+        create_final_stack_tooltip = "Create a final stack by combining all preprocessed lights. Automatically enabled and locked for paneled mosaic."
 
         self.create_final_stack_check = QCheckBox("Create final stack")
         self.create_final_stack_check.setToolTip(create_final_stack_tooltip)
         self.create_final_stack_check.setChecked(True)
         stack_layout.addWidget(self.create_final_stack_check)
-
-        mono_checkbox_tooltip = "Experimental: Process images as monochrome (no debayering). Use only for monochrome cameras or special processing needs."
-
-        self.mono_check = QCheckBox("Mono (Experimental)")
-        self.mono_check.setToolTip(mono_checkbox_tooltip)
-        stack_layout.addWidget(self.mono_check)
 
         stack_group.setLayout(stack_layout)
         processing_layout.addWidget(stack_group)
@@ -1312,10 +1468,17 @@ class PreprocessingInterface(QMainWindow):
                 feather_amount=self.feather_amount_spinbox.value(),
                 filter_round=self.roundness_spinbox.value(),
                 filter_wfwhm=self.fwhm_spinbox.value(),
+                filter_stars=self.stars_spinbox.value(),
+                filter_bkg=self.bkg_spinbox.value(),
+                use_filter_round=self.roundness_check.isChecked(),
+                use_filter_wfwhm=self.fwhm_check.isChecked(),
+                use_filter_stars=self.stars_check.isChecked(),
+                use_filter_bkg=self.bkg_check.isChecked(),
                 clean_up_files=self.cleanup_check.isChecked(),
-                process_separately=self.process_separately_check.isChecked(),
+                process_separately=self.multi_target_radio.isChecked()
+                or self.paneled_mosaic_radio.isChecked(),
                 save_calibrated_lights=self.save_calibrated_lights_check.isChecked(),
-                paneled_mosaic=self.paneled_mosaic_check.isChecked(),
+                paneled_mosaic=self.paneled_mosaic_radio.isChecked(),
             )
         )
         processing_layout.addWidget(process_btn)
@@ -1389,20 +1552,41 @@ class PreprocessingInterface(QMainWindow):
         )
 
     def update_process_separately_checkbox(self):
-        """Update the enabled state of process_separately_check based on session count."""
-        self.process_separately_check.setEnabled(len(self.sessions) > 1)
-        self.paneled_mosaic_check.setEnabled(len(self.sessions) > 1)
-        if len(self.sessions) == 1:
-            self.process_separately_check.setChecked(False)
-            self.paneled_mosaic_check.setChecked(False)
+        """Update the enabled state of target mode radios based on session count."""
+        multi_session = len(self.sessions) > 1
+        self.multi_target_radio.setEnabled(multi_session)
+        self.paneled_mosaic_radio.setEnabled(multi_session)
+        if not multi_session:
+            self.single_target_radio.setChecked(True)
 
-    def on_paneled_mosaic_toggled(self):
-        """Auto-enable and lock process_separately when paneled_mosaic is checked."""
-        if self.paneled_mosaic_check.isChecked():
-            self.process_separately_check.setChecked(True)
-            self.process_separately_check.setEnabled(False)
+    def on_target_mode_changed(self, button, checked):
+        """Update create_final_stack state when target mode radio selection changes."""
+        if not checked:
+            return
+        if self.paneled_mosaic_radio.isChecked():
+            self.create_final_stack_check.setChecked(True)
+            self.create_final_stack_check.setEnabled(False)
+        elif self.multi_target_radio.isChecked() or self.mono_radio.isChecked():
+            self.create_final_stack_check.setChecked(False)
+            self.create_final_stack_check.setEnabled(False)
+        else:  # single target
+            self.create_final_stack_check.setChecked(True)
+            self.create_final_stack_check.setEnabled(True)
+
+    def _on_filter_mode_changed(self, combo, spinbox):
+        """Update spinbox properties when filter mode changes between σ and %."""
+        if combo.currentText() == "σ":
+            spinbox.setRange(1, 4)
+            spinbox.setSingleStep(0.1)
+            spinbox.setDecimals(1)
+            spinbox.setValue(3.0)
+            spinbox.setSuffix(" σ")
         else:
-            self.process_separately_check.setEnabled(len(self.sessions) > 1)
+            spinbox.setRange(1, 100)
+            spinbox.setSingleStep(1)
+            spinbox.setDecimals(0)
+            spinbox.setValue(100)
+            spinbox.setSuffix(" %")
 
     def save_presets(self):
         """Save current UI settings and session data to a preset file"""
@@ -1416,12 +1600,28 @@ class PreprocessingInterface(QMainWindow):
             "feather_amount": round(self.feather_amount_spinbox.value(), 2),
             "filter_round": round(self.roundness_spinbox.value(), 1),
             "filter_wfwhm": round(self.fwhm_spinbox.value(), 1),
+            "filter_stars": round(self.stars_spinbox.value(), 1),
+            "filter_bkg": round(self.bkg_spinbox.value(), 1),
+            "use_filter_round": self.roundness_check.isChecked(),
+            "use_filter_wfwhm": self.fwhm_check.isChecked(),
+            "use_filter_stars": self.stars_check.isChecked(),
+            "use_filter_bkg": self.bkg_check.isChecked(),
+            "filter_round_mode": self.roundness_mode_combo.currentText(),
+            "filter_wfwhm_mode": self.fwhm_mode_combo.currentText(),
+            "filter_stars_mode": self.stars_mode_combo.currentText(),
+            "filter_bkg_mode": self.bkg_mode_combo.currentText(),
             "cleanup": self.cleanup_check.isChecked(),
-            "process_separately": self.process_separately_check.isChecked(),
+            "target_mode": (
+                "paneled"
+                if self.paneled_mosaic_radio.isChecked()
+                else (
+                    "multi"
+                    if self.multi_target_radio.isChecked()
+                    else "mono" if self.mono_radio.isChecked() else "single"
+                )
+            ),
             "create_final_stack": self.create_final_stack_check.isChecked(),
-            "mono": self.mono_check.isChecked(),
             "save_calibrated_lights": self.save_calibrated_lights_check.isChecked(),
-            "paneled_mosaic": self.paneled_mosaic_check.isChecked(),
             # Add session information
             "sessions": [],
         }
@@ -1487,21 +1687,48 @@ class PreprocessingInterface(QMainWindow):
                 self.pixel_fraction_spinbox.setValue(presets.get("pixel_fraction", 1.0))
                 self.feather_checkbox.setChecked(presets.get("feather", False))
                 self.feather_amount_spinbox.setValue(presets.get("feather_amount", 20))
+                self.roundness_mode_combo.setCurrentText(
+                    presets.get("filter_round_mode", "σ")
+                )
+                self.fwhm_mode_combo.setCurrentText(
+                    presets.get("filter_wfwhm_mode", "σ")
+                )
+                self.stars_mode_combo.setCurrentText(
+                    presets.get("filter_stars_mode", "σ")
+                )
+                self.bkg_mode_combo.setCurrentText(presets.get("filter_bkg_mode", "σ"))
                 self.roundness_spinbox.setValue(presets.get("filter_round", 3.0))
                 self.fwhm_spinbox.setValue(presets.get("filter_wfwhm", 3.0))
+                self.stars_spinbox.setValue(presets.get("filter_stars", 3.0))
+                self.bkg_spinbox.setValue(presets.get("filter_bkg", 3.0))
+                self.roundness_check.setChecked(presets.get("use_filter_round", False))
+                self.fwhm_check.setChecked(presets.get("use_filter_wfwhm", False))
+                self.stars_check.setChecked(presets.get("use_filter_stars", False))
+                self.bkg_check.setChecked(presets.get("use_filter_bkg", False))
                 self.cleanup_check.setChecked(presets.get("cleanup", False))
-                self.process_separately_check.setChecked(
-                    presets.get("process_separately", False)
-                )
+                target_mode = presets.get("target_mode", "single")
+                # Support legacy presets that used boolean fields
+                if target_mode == "single" and presets.get("paneled_mosaic", False):
+                    target_mode = "paneled"
+                elif target_mode == "single" and presets.get(
+                    "process_separately", False
+                ):
+                    target_mode = "multi"
+                elif target_mode == "single" and presets.get("mono", False):
+                    target_mode = "mono"
+                if target_mode == "paneled" and len(self.sessions) > 1:
+                    self.paneled_mosaic_radio.setChecked(True)
+                elif target_mode == "multi" and len(self.sessions) > 1:
+                    self.multi_target_radio.setChecked(True)
+                elif target_mode == "mono":
+                    self.mono_radio.setChecked(True)
+                else:
+                    self.single_target_radio.setChecked(True)
                 self.create_final_stack_check.setChecked(
                     presets.get("create_final_stack", True)
                 )
-                self.mono_check.setChecked(presets.get("mono", False))
                 self.save_calibrated_lights_check.setChecked(
                     presets.get("save_calibrated_lights", False)
-                )
-                self.paneled_mosaic_check.setChecked(
-                    presets.get("paneled_mosaic", False)
                 )
 
                 # Load session data
@@ -1551,6 +1778,12 @@ class PreprocessingInterface(QMainWindow):
         feather_amount: float = UI_DEFAULTS["feather_amount"],
         filter_round: float = UI_DEFAULTS["filter_round"],
         filter_wfwhm: float = UI_DEFAULTS["filter_wfwhm"],
+        filter_stars: float = UI_DEFAULTS["filter_stars"],
+        filter_bkg: float = UI_DEFAULTS["filter_bkg"],
+        use_filter_round: bool = False,
+        use_filter_wfwhm: bool = False,
+        use_filter_stars: bool = False,
+        use_filter_bkg: bool = False,
         clean_up_files: bool = False,
         process_separately: bool = False,
         save_calibrated_lights: bool = False,
@@ -1564,13 +1797,15 @@ class PreprocessingInterface(QMainWindow):
             f"pixel_fraction={pixel_fraction}\n"
             f"feather={feather}\n"
             f"feather_amount={feather_amount}\n"
-            f"filter_round={filter_round}\n"
-            f"filter_wfwhm={filter_wfwhm}\n"
+            f"filter_round={filter_round} (enabled={use_filter_round})\n"
+            f"filter_wfwhm={filter_wfwhm} (enabled={use_filter_wfwhm})\n"
+            f"filter_stars={filter_stars} (enabled={use_filter_stars})\n"
+            f"filter_bkg={filter_bkg} (enabled={use_filter_bkg})\n"
             f"clean_up_files={clean_up_files}\n"
             f"process_separately={process_separately}\n"
             f"save_calibrated_lights={save_calibrated_lights}\n"
             f"paneled_mosaic={paneled_mosaic}\n"
-            f"build={VERSION}-b01",
+            f"build={VERSION}-{BUILD}",
             LogColor.BLUE,
         )
         self.siril.cmd("close")
@@ -1583,6 +1818,7 @@ class PreprocessingInterface(QMainWindow):
             or os.path.exists("mono_stacks")
             or os.path.exists("individual_stacks")
             or os.path.exists("paneled_mosaic_process")
+            or os.path.exists("final_stack_process")
         ):
             msg = """One or more old processing directories found (sessions, process, collected_lights, mono_stacks, individual_stacks, paneled_mosaic_process). 
                 \nDo you want to delete them and start fresh?
@@ -1620,6 +1856,11 @@ class PreprocessingInterface(QMainWindow):
                     self.siril.log(
                         "Cleaned up old paneled_mosaic_process directory", LogColor.BLUE
                     )
+                if os.path.exists("final_stack_process"):
+                    shutil.rmtree("final_stack_process")
+                    self.siril.log(
+                        "Cleaned up old final_stack_process directory", LogColor.BLUE
+                    )
             else:
                 self.siril.log(
                     "User chose to preserve old processing files. Stopping script.",
@@ -1635,6 +1876,15 @@ class PreprocessingInterface(QMainWindow):
 
         # Get all sessions
         session_to_process = self.get_all_sessions()
+
+        # True when user wants a final stack but hasn't opted to save calibrated lights.
+        # Each session is stacked individually first, then combined at the end.
+        needs_per_session_stack = (
+            self.single_target_radio.isChecked()
+            and self.create_final_stack_check.isChecked()
+            and not save_calibrated_lights
+            and not self.mono_check.isChecked()
+        )
 
         for idx, session in enumerate(
             session_to_process
@@ -1712,9 +1962,18 @@ class PreprocessingInterface(QMainWindow):
                 )
 
             # Process separately if requested or mono is selected
-            if process_separately or self.mono_check.isChecked():
+            # IF paneled mosaic, create the individual stacks dir and images in there for later processing
+            if (
+                process_separately
+                or self.mono_check.isChecked()
+                or needs_per_session_stack
+            ):
                 # Create individual_stacks directory
-                dirname = "individual_stacks" if process_separately else "mono_stacks"
+                dirname = (
+                    "mono_stacks"
+                    if self.mono_check.isChecked()
+                    else "individual_stacks"
+                )
                 individual_stacks_dir = os.path.join(self.home_directory, dirname)
                 os.makedirs(individual_stacks_dir, exist_ok=True)
 
@@ -1737,6 +1996,12 @@ class PreprocessingInterface(QMainWindow):
                         pixel_fraction=pixel_fraction,
                         filter_wfwhm=filter_wfwhm,
                         filter_round=filter_round,
+                        filter_stars=filter_stars,
+                        filter_bkg=filter_bkg,
+                        use_filter_round=use_filter_round,
+                        use_filter_wfwhm=use_filter_wfwhm,
+                        use_filter_stars=use_filter_stars,
+                        use_filter_bkg=use_filter_bkg,
                     )
                 else:
                     # If Siril can't plate solve, we apply regular registration with 2pass and then apply registration with max framing
@@ -1751,6 +2016,12 @@ class PreprocessingInterface(QMainWindow):
                         pixel_fraction=pixel_fraction,
                         filter_wfwhm=filter_wfwhm,
                         filter_round=filter_round,
+                        filter_stars=filter_stars,
+                        filter_bkg=filter_bkg,
+                        use_filter_round=use_filter_round,
+                        use_filter_wfwhm=use_filter_wfwhm,
+                        use_filter_stars=use_filter_stars,
+                        use_filter_bkg=use_filter_bkg,
                     )
 
                 individual_seq_name = f"r_{individual_seq_name}"
@@ -1969,6 +2240,14 @@ class PreprocessingInterface(QMainWindow):
                     seq_name=seq_name,
                     drizzle_amount=drizzle_amount,
                     pixel_fraction=pixel_fraction,
+                    filter_wfwhm=filter_wfwhm,
+                    filter_round=filter_round,
+                    filter_stars=filter_stars,
+                    filter_bkg=filter_bkg,
+                    use_filter_round=use_filter_round,
+                    use_filter_wfwhm=use_filter_wfwhm,
+                    use_filter_stars=use_filter_stars,
+                    use_filter_bkg=use_filter_bkg,
                 )
             else:
                 # If Siril can't plate solve, we apply regular registration with 2pass and then apply registration with max framing
@@ -1981,6 +2260,14 @@ class PreprocessingInterface(QMainWindow):
                     seq_name=seq_name,
                     drizzle_amount=drizzle_amount,
                     pixel_fraction=pixel_fraction,
+                    filter_wfwhm=filter_wfwhm,
+                    filter_round=filter_round,
+                    filter_stars=filter_stars,
+                    filter_bkg=filter_bkg,
+                    use_filter_round=use_filter_round,
+                    use_filter_wfwhm=use_filter_wfwhm,
+                    use_filter_stars=use_filter_stars,
+                    use_filter_bkg=use_filter_bkg,
                 )
 
             seq_name = f"r_{seq_name}"
@@ -2017,17 +2304,113 @@ class PreprocessingInterface(QMainWindow):
         elif (
             not self.mono_check.isChecked()
             and self.create_final_stack_check.isChecked()
-            and self.process_separately_check.isChecked()
+            and self.multi_target_radio.isChecked()
         ):
             self.siril.log(
-                "Final stack creation skipped due to process separately option",
+                "Final stack creation skipped due to multi-target mode",
                 LogColor.BLUE,
             )
+        elif needs_per_session_stack:
+            # Single target, create final stack, no save calibrated lights:
+            # combine the per-session individual stacks produced above.
+            self.siril.log(
+                "Building final stack from individual session stacks...",
+                LogColor.BLUE,
+            )
+            individual_stacks_dir = os.path.join(
+                self.home_directory, "individual_stacks"
+            )
+            final_stack_process_dir = os.path.join(
+                self.current_working_directory, "final_stack_process"
+            )
+            os.makedirs(final_stack_process_dir, exist_ok=True)
+
+            fits_files = [
+                fname
+                for fname in os.listdir(individual_stacks_dir)
+                if fname.endswith(self.fits_extension)
+            ]
+            self.siril.log(
+                f"Found {len(fits_files)} individual stack(s) to combine: {fits_files}",
+                LogColor.BLUE,
+            )
+
+            if len(fits_files) == 0:
+                self.siril.log(
+                    "No individual stacks found, skipping final stack.",
+                    LogColor.SALMON,
+                )
+            elif len(fits_files) == 1:
+                # Single session — just load, cd home, save
+                self.siril.cmd("cd", f'"{individual_stacks_dir}"')
+                self.load_image(image_name=os.path.splitext(fits_files[0])[0])
+                self.siril.cmd("cd", f'"{self.home_directory}"')
+                self.current_working_directory = self.siril.get_siril_wd()
+                file_name = self.save_image("_og")
+                self.load_image(image_name=file_name)
+                self.siril.log(f"Final stack saved as {file_name}", LogColor.GREEN)
+            else:
+                # Multiple sessions — copy to final_stack_process, link, plate solve, register, stack
+                for fname in fits_files:
+                    src = os.path.join(individual_stacks_dir, fname)
+                    dst = os.path.join(final_stack_process_dir, fname)
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception as e:
+                        self.siril.log(f"Failed to copy {fname}: {e}", LogColor.RED)
+
+                lights_dir = os.path.join(final_stack_process_dir, "lights")
+                os.makedirs(lights_dir, exist_ok=True)
+                for fname in fits_files:
+                    src = os.path.join(final_stack_process_dir, fname)
+                    dst = os.path.join(lights_dir, fname)
+                    if os.path.exists(src):
+                        shutil.move(src, dst)
+
+                self.siril.cmd("cd", f'"{lights_dir}"')
+                self.siril.cmd("link", "lights")
+                seq_name = "lights_"
+
+                plate_solve_ok = self.seq_plate_solve(seq_name=seq_name)
+                if plate_solve_ok:
+                    try:
+                        self.siril.cmd(
+                            "seqapplyreg", seq_name, "-kernel=square", "-framing=max"
+                        )
+                        seq_name = f"r_{seq_name}"
+                    except (s.DataError, s.CommandError, s.SirilError) as e:
+                        self.siril.log(
+                            f"Could not apply registration: {e}", LogColor.RED
+                        )
+                else:
+                    try:
+                        self.siril.cmd("register", seq_name, "-2pass")
+                        self.siril.cmd("seqapplyreg", seq_name)
+                        seq_name = f"r_{seq_name}"
+                    except (s.DataError, s.CommandError, s.SirilError) as e:
+                        self.siril.log(
+                            f"Could not apply registration: {e}", LogColor.RED
+                        )
+
+                self.seq_stack(
+                    seq_name=seq_name,
+                    feather=feather,
+                    feather_amount=feather_amount,
+                    rejection=True,
+                    output_name="final_stacked",
+                    overlap_norm=False,
+                )
+                self.load_image(image_name="final_stacked")
+                self.siril.cmd("cd", f'"{self.home_directory}"')
+                self.current_working_directory = self.siril.get_siril_wd()
+                file_name = self.save_image("_og")
+                self.load_image(image_name=file_name)
+                self.siril.log(f"Final stack saved as {file_name}", LogColor.GREEN)
         else:
             self.siril.log("Final stack creation skipped", LogColor.BLUE)
 
         # Paneled mosaic workflow
-        if paneled_mosaic and process_separately:
+        if paneled_mosaic:
             self.siril.log("Starting paneled mosaic creation...", LogColor.BLUE)
             individual_stacks_dir = os.path.join(
                 self.home_directory, "individual_stacks"
