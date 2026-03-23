@@ -532,11 +532,13 @@ class PreprocessingInterface(QMainWindow):
         if os.path.isdir(directory):
             print(f"Found directory for {image_type}: {directory}")
             self.siril.cmd("cd", f'"{directory}"')
+            # Ignore hidden files and dirs
             file_count = len(
                 [
                     name
                     for name in os.listdir(directory)
                     if os.path.isfile(os.path.join(directory, name))
+                    and not name.startswith(".")
                 ]
             )
             if file_count == 0:
