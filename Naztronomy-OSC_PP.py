@@ -1060,7 +1060,16 @@ class PreprocessingInterface(QMainWindow):
                 file_path = os.path.join(process_dir, f)
                 if os.path.isfile(file_path):
                     # print(f"Removing: {file_path}")
-                    os.remove(file_path)
+                    # Retry loop for safe deletion
+                    for i in range(3):
+                        try:
+                            os.remove(file_path)
+                            break
+                        except OSError:
+                            time.sleep(0.5)
+                    else:
+                        # If loop completes without break, deletion failed
+                        self.siril.log(f"Failed to delete {file_path}", LogColor.SALMON)
         self.siril.log(f"Cleaned up {prefix}", LogColor.BLUE)
 
     def show_help(self):
