@@ -89,9 +89,6 @@ from astropy.io import fits
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
-
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
 VERSION = "2.0.1"
@@ -172,8 +169,6 @@ class PreprocessingInterface(QMainWindow):
         # if drizzle is off, images will be debayered on convert
         self.drizzle_status = False
         self.drizzle_factor = 0
-
-        self.target_coords = None
 
         try:
             self.siril.connect()
@@ -476,8 +471,9 @@ class PreprocessingInterface(QMainWindow):
                 if files:
                     self.siril.log(f"--- {file_type.upper()} ---", LogColor.BLUE)
                     for index, file in enumerate(files):
-                        print(
-                            f"{index + 1:>4}. {file_type.capitalize():^20}  {str(file.resolve())}"
+                        self.siril.log(
+                            f"{index + 1:>4}. {file_type.capitalize():^20}  {str(file.resolve())}",
+                            LogColor.BLUE,
                         )
 
     def remove_selected_files(self):
@@ -1720,7 +1716,7 @@ class PreprocessingInterface(QMainWindow):
         close_button.setMinimumWidth(100)
         close_button.setMinimumHeight(35)
         close_button.clicked.connect(self.close_dialog)
-        button_layout.addWidget(close_button)
+        # button_layout.addWidget(close_button)
 
         # button_layout.addWidget(help_button)
         button_layout.addStretch()
@@ -1882,17 +1878,14 @@ class PreprocessingInterface(QMainWindow):
         """Load settings and session data from a preset file.
         If filepath is None, loads from the default location (or shows dialog if not found).
         """
-        print("here")
         try:
             if not filepath:
                 cwd = self.current_working_directory
-                print(cwd)
                 default_presets_file = (
                     os.path.join(cwd, "presets", "naztronomy_osc_pp_presets.json")
                     if cwd
                     else None
                 )
-                print(f"Looking for presets file at: {default_presets_file}")
                 # Only use the default file if it exists and has content
                 if (
                     default_presets_file
