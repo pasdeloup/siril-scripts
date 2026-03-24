@@ -2897,8 +2897,12 @@ class PreprocessingInterface(QMainWindow):
                         filename.startswith("session") and filename.endswith(extension)
                     ):
                         os.remove(file_path)
-                shutil.rmtree(os.path.join(collected_lights_dir, "cache"))
-                shutil.rmtree(os.path.join(collected_lights_dir, "drizztmp"))
+                shutil.rmtree(
+                    os.path.join(collected_lights_dir, "cache"), ignore_errors=True
+                )
+                shutil.rmtree(
+                    os.path.join(collected_lights_dir, "drizztmp"), ignore_errors=True
+                )
 
                 self.siril.log("Cleaned up collected_lights directory", LogColor.BLUE)
             except Exception as e:
@@ -2908,12 +2912,14 @@ class PreprocessingInterface(QMainWindow):
 
             if self.mono_check.isChecked():
                 shutil.rmtree(
-                    os.path.join(self.current_working_directory, "mono_process")
+                    os.path.join(self.current_working_directory, "mono_process"),
+                    ignore_errors=True,
                 )
                 shutil.rmtree(
                     os.path.join(
                         self.current_working_directory, "mono_stacks", "lights"
-                    )
+                    ),
+                    ignore_errors=True,
                 )
                 self.siril.log("Cleaned up mono_process directory", LogColor.BLUE)
 
@@ -2923,7 +2929,7 @@ class PreprocessingInterface(QMainWindow):
             )
             if os.path.exists(paneled_mosaic_process_dir):
                 try:
-                    shutil.rmtree(paneled_mosaic_process_dir)
+                    shutil.rmtree(paneled_mosaic_process_dir, ignore_errors=True)
                     self.siril.log(
                         "Cleaned up paneled_mosaic_process directory", LogColor.BLUE
                     )
@@ -2934,8 +2940,14 @@ class PreprocessingInterface(QMainWindow):
                     )
 
             try:
-                shutil.rmtree(os.path.join(self.current_working_directory, "cache"))
-                shutil.rmtree(os.path.join(self.current_working_directory, "drizztmp"))
+                shutil.rmtree(
+                    os.path.join(self.current_working_directory, "cache"),
+                    ignore_errors=True,
+                )
+                shutil.rmtree(
+                    os.path.join(self.current_working_directory, "drizztmp"),
+                    ignore_errors=True,
+                )
                 self.siril.log(
                     "Cleaned up extra cache and drizztmp directories", LogColor.BLUE
                 )
