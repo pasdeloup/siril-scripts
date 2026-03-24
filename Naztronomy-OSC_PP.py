@@ -95,7 +95,7 @@ import threading
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
 VERSION = "2.0.1"
-BUILD = "20260323"
+BUILD = "20260324"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "https://www.Naztronomy.com"
 YOUTUBE = "https://www.YouTube.com/Naztronomy"
@@ -112,7 +112,6 @@ UI_DEFAULTS = {
     "filter_bkg": 3.0,
     "drizzle_amount": 1.0,
     "pixel_fraction": 1.0,
-    "max_files_per_batch": 2000,
 }
 FRAME_TYPES = ("lights", "darks", "flats", "biases")
 
