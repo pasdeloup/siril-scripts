@@ -49,8 +49,7 @@ from pathlib import Path
 import shutil
 import sirilpy as s
 
-s.ensure_installed("PyQt6", "numpy", "astropy")
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -74,8 +73,12 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QToolButton,
     QMenu,
+    QDialog,
+    QTextBrowser,
+    QSizePolicy,
+    QScrollArea,
 )
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QAction
+from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QAction, QDesktopServices
 from datetime import datetime
 import time
 import os
@@ -94,8 +97,11 @@ APP_NAME = "Naztronomy - OSC Image Preprocessor"
 VERSION = "2.0.1"
 BUILD = "20260323"
 AUTHOR = "Nazmus Nasir"
-WEBSITE = "Naztronomy.com"
-YOUTUBE = "YouTube.com/Naztronomy"
+WEBSITE = "https://www.Naztronomy.com"
+YOUTUBE = "https://www.YouTube.com/Naztronomy"
+DISCORD = "https://discord.gg/yXKqrawpjr"
+PATREON = "https://www.patreon.com/c/naztronomy"
+BUY_ME_A_COFFEE = "https://www.buymeacoffee.com/naztronomy"
 
 
 UI_DEFAULTS = {
@@ -948,6 +954,8 @@ class PreprocessingInterface(QMainWindow):
         rejection=False,
         output_name=None,
         overlap_norm=False,
+        stack_weighted=False,
+        weighting_method="Weighted FWHM",
     ):
         """Stack it all, and feather if it's provided"""
         out = "result" if output_name is None else output_name
@@ -962,9 +970,16 @@ class PreprocessingInterface(QMainWindow):
             "-rgb_equal",
             "-maximize",
             "-filter-included",
-            # "-weight=wfwhm",
             f"-out={out}",
         ]
+        if stack_weighted:
+            weighting_map = {
+                "Number of Stars": "nbstars",
+                "Weighted FWHM": "wfwhm",
+                "Noise": "noise",
+            }
+            weight_option = weighting_map.get(weighting_method, "wfwhm")
+            cmd_args.append(f"-weight={weight_option}")
         if feather:
             cmd_args.append(f"-feather={feather_amount}")
 
@@ -1077,35 +1092,158 @@ class PreprocessingInterface(QMainWindow):
         self.siril.log(f"Cleaned up {prefix}", LogColor.BLUE)
 
     def show_help(self):
-        help_text = (
-            f"Author: {AUTHOR} ({WEBSITE})\n"
-            f"Youtube: {YOUTUBE}\n"
-            "Discord: https://discord.gg/yXKqrawpjr\n"
-            "Patreon: https://www.patreon.com/c/naztronomy\n"
-            "Buy me a Coffee: https://www.buymeacoffee.com/naztronomy\n\n"
-            "Info:\n"
-            "1. Recommend using blank working directory for clean setup.\n"
-            "2. Calibration Frames are Optional.\n"
-            "3. Presets can be saved and loaded automatically from the presets dir.\n"
-            "4. Multiple sessions allowed. 2048 total lights limit on Windows.\n"
-            "5. Preprocessed lights saved in collected_lights directory.\n"
-            "6. Drizzle increases processing time significantly.\n"
-            "7. Master frames saved to 'masters' with descriptive names.\n"
-            "8. 'Process separately' creates individual session stacks.\n"
-            "9. 'Mono' mode for monochrome cameras and are saved individually, frames are not combined.\n"
-            "10. Filter settings exclude poor quality frames.\n"
-            "11. Single calibration files treated as masters.\n"
-            "12. Include logs when asking for help."
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{APP_NAME} — Help")
+        dialog.setMinimumSize(620, 580)
+        dialog.resize(660, 640)
+
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+
+        # Header
+        header_label = QLabel(f"<b>{APP_NAME}</b>")
+        header_font = QFont()
+        header_font.setPointSize(11)
+        header_label.setFont(header_font)
+        outer.addWidget(header_label)
+
+        author_label = QLabel(f'<a href="{WEBSITE}">{AUTHOR} (Naztronomy)</a>')
+        author_label.setOpenExternalLinks(True)
+        outer.addWidget(author_label)
+
+        # Scrollable help text
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setReadOnly(True)
+        browser.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        QMessageBox.information(self, "Help", help_text)
-        self.siril.log(help_text, LogColor.BLUE)
+        browser.setHtml(
+            """
+            <style>
+            body  { font-family: sans-serif; font-size: 13px; margin: 4px; }
+            h3    { margin-bottom: 4px; margin-top: 14px; color: #2c7bb6; }
+            h3:first-child { margin-top: 0; }
+            ul    { margin-top: 2px; padding-left: 18px; }
+            li    { margin-bottom: 3px; }
+            .note { color: #888; font-style: italic; }
+            </style>
+
+            <h3>General</h3>
+            <ul>
+            <li>Use a <b>blank working directory</b> for the cleanest setup.</li>
+            <li>Calibration frames (darks, flats, biases) are <b>optional</b>.</li>
+            <li>Single calibration files are treated as <b>masters</b> automatically.</li>
+            <li>Master frames are saved to a <b>masters/</b> directory with descriptive names.</li>
+            <li>Filter settings can be used to <b>exclude poor quality frames</b> before stacking.</li>
+            <li>Maximum of <b>2048 total light frames</b> across all sessions on Windows. Experimental UCRT64 version increases the limit to 8192 files.</li>
+            <li>Always <b>include logs</b> when asking for help. Click the download arrow at the bottom of the console to export your logs.</li>
+            </ul>
+
+            <h3>Sessions</h3>
+            <ul>
+            <li>Add multiple sessions to process <b>data from different nights or targets</b>.</li>
+            <li>Each session has its own lights, darks, flats, and biases.</li>
+            <li>Calibration cannot be shared between sessions (yet).</li>
+            <li>Preprocessed lights are saved to a <b>collected_lights/</b> directory when
+                <i>Save Calibrated Lights</i> is enabled.</li>
+            </ul>
+
+            <h3>Presets</h3>
+            <ul>
+            <li>Presets auto-save/load from the <b>presets/</b> directory in your working folder.</li>
+            <li>Use <b>Save As…</b> / <b>Load From…</b> (dropdown arrow on the buttons) to choose
+                a custom file location.</li>
+            </ul>
+
+            <h3>Drizzle</h3>
+            <ul>
+            <li>Drizzle can improve resolution but <b>increases processing time</b> and file size significantly. It may also product black frames which are then automatically purged by this script.</li>
+            <li>Recommended to use drizzle 1x.</li>
+            <li>Lower pixel-fraction values reduce artifacts but may increase noise.</li>
+            </ul>
+
+            <h3>Target Modes</h3>
+            <ul>
+            <li><b>Single Target</b>: All sessions are combined into one final stacked image.
+                Best for imaging the same object across multiple nights.</li>
+            <li><b>Multi Target (Do Not Combine)</b>: Each session is processed and stacked
+                <i>separately</i>. Use when sessions contain different objects or filters that
+                should not be merged.</li>
+            <li><b>Create Paneled Mosaic</b>: Sessions are registered and stacked together
+                with overlap-normalisation to produce a seamless mosaic. Each session should
+                cover a different panel of the same field.</li>
+            <li><b>Mono (Experimental)</b>: For monochrome cameras. Frames are calibrated and
+                stacked individually per session and are <b>not combined</b>. Debayering is
+                skipped. A final mono_stacks folder is created where the stacked and registered mono sessions are saved.</li>
+            </ul>
+
+            <h3>Create Final Stack</h3>
+            <ul>
+            <li>When <i>Single Target</i> is selected and <i>Save Calibrated Lights</i> is
+                <b>off</b>, each session is stacked individually first, then the per-session
+                stacks are combined into a final result.</li>
+            <li>When <i>Save Calibrated Lights</i> is <b>on</b>, all calibrated lights are
+                collected and stacked together in one pass.</li>
+            </ul>
+            """
+        )
+        outer.addWidget(browser)
+
+        # Social / community buttons
+        links_label = QLabel("<b>Community &amp; Support</b>")
+        outer.addWidget(links_label)
+
+        links_row = QHBoxLayout()
+        links_row.setSpacing(8)
+
+        social_buttons = [
+            (
+                "YouTube",
+                "#FF0000",
+                f"{YOUTUBE}",
+            ),
+            ("Discord", "#5865F2", f"{DISCORD}"),
+            ("Patreon", "#FF424D", f"{PATREON}"),
+            ("Buy Me a Coffee", "#FFDD00", f"{BUY_ME_A_COFFEE}"),
+            # ("Website", "#2c7bb6", f"{WEBSITE}"),
+        ]
+
+        for label, color, url in social_buttons:
+            btn = QPushButton(label)
+            text_color = "#000" if color == "#FFDD00" else "#fff"
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {color}; color: {text_color};"
+                f" border: none; border-radius: 4px; padding: 6px 10px; font-weight: bold; }}"
+                f" QPushButton:hover {{ opacity: 0.85; border: 1px solid rgba(0,0,0,0.3); }}"
+            )
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(url)
+            btn.clicked.connect(
+                lambda checked, u=url: QDesktopServices.openUrl(QUrl(u))
+            )
+            links_row.addWidget(btn)
+
+        outer.addLayout(links_row)
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(90)
+        close_btn.clicked.connect(dialog.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
+
+        dialog.exec()
 
     def create_widgets(self):
         """Creates the UI widgets using PyQt6."""
 
         # Main layout
         main_widget = QWidget()
-        self.setMinimumSize(750, 600)
+        self.setMinimumSize(750, 700)
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(15, 10, 15, 15)
@@ -1191,11 +1329,26 @@ class PreprocessingInterface(QMainWindow):
 
         # Processing tab
         processing_tab = QWidget()
-        processing_layout = QVBoxLayout(processing_tab)
+        processing_tab_outer = QVBoxLayout(processing_tab)
+        processing_tab_outer.setContentsMargins(0, 0, 0, 0)
+        processing_tab_outer.setSpacing(6)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        scroll_content = QWidget()
+        processing_layout = QVBoxLayout(scroll_content)
 
         # Drizzle settings
         drizzle_group = QGroupBox("Optional Preprocessing Steps")
         drizzle_layout = QVBoxLayout()
+
+        cleanup_tooltip = "Enable this option to delete all intermediary files after they are done processing. This saves space on your hard drive.\nNote: If your session is batched, this option is automatically enabled even if it's unchecked!"
+        self.cleanup_check = QCheckBox("Clean up intermediate files")
+        self.cleanup_check.setToolTip(cleanup_tooltip)
+        drizzle_layout.addWidget(self.cleanup_check)
 
         bg_extract_tooltip = "Removes background gradients from your images before stacking. Uses Polynomial value 1 and 10 samples."
 
@@ -1380,14 +1533,11 @@ class PreprocessingInterface(QMainWindow):
         stack_group = QGroupBox("Stacking Settings")
         stack_layout = QVBoxLayout()
 
-        self.feather_checkbox = QCheckBox("Enable Feather")
-        stack_layout.addWidget(self.feather_checkbox)
-
         feather_tooltip = "Blends the edges of stacked frames to reduce edge artifacts in the final image."
-        feather_amount_label_tooltip = "Size of the feathering blend in pixels. Larger values create smoother transitions but may affect more of the image edge."
-        feather_amount_layout = QHBoxLayout()
-        feather_amount_label = QLabel("Feather Amount:")
-        feather_amount_label.setToolTip(feather_tooltip)
+        feather_amount_tooltip = "Size of the feathering blend in pixels. Larger values create smoother transitions but may affect more of the image edge."
+        feather_layout = QHBoxLayout()
+        self.feather_checkbox = QCheckBox("Enable Feather:")
+        self.feather_checkbox.setToolTip(feather_tooltip)
         self.feather_amount_spinbox = QSpinBox()
         self.feather_amount_spinbox.setRange(5, 2000)
         self.feather_amount_spinbox.setSingleStep(5)
@@ -1395,18 +1545,27 @@ class PreprocessingInterface(QMainWindow):
         self.feather_amount_spinbox.setMinimumWidth(80)
         self.feather_amount_spinbox.setSuffix(" px")
         self.feather_amount_spinbox.setEnabled(False)
-        self.feather_amount_spinbox.setToolTip(feather_amount_label_tooltip)
-        feather_amount_layout.addWidget(feather_amount_label)
-        feather_amount_layout.addWidget(self.feather_amount_spinbox)
-        stack_layout.addLayout(feather_amount_layout)
-
-        cleanup_tooltip = "Enable this option to delete all intermediary files after they are done processing. This saves space on your hard drive.\nNote: If your session is batched, this option is automatically enabled even if it's unchecked!"
-
-        self.cleanup_check = QCheckBox("Clean up intermediate files")
-        self.cleanup_check.setToolTip(cleanup_tooltip)
-        stack_layout.addWidget(self.cleanup_check)
+        self.feather_amount_spinbox.setToolTip(feather_amount_tooltip)
+        feather_layout.addWidget(self.feather_checkbox)
+        feather_layout.addWidget(self.feather_amount_spinbox)
+        stack_layout.addLayout(feather_layout)
 
         self.feather_checkbox.toggled.connect(self.feather_amount_spinbox.setEnabled)
+
+        weight_tooltip = "Weight frames during stacking to bias the result toward higher-quality frames."
+        weight_method_tooltip = "Weighting method: Number of Stars (more stars = more weight), Weighted FWHM (sharper = more weight), Noise (less noise = more weight)."
+        weight_layout = QHBoxLayout()
+        self.weight_stack_check = QCheckBox("Weight stacking:")
+        self.weight_stack_check.setToolTip(weight_tooltip)
+        self.weight_method_combo = QComboBox()
+        self.weight_method_combo.addItems(["Number of Stars", "Weighted FWHM", "Noise"])
+        self.weight_method_combo.setCurrentText("Weighted FWHM")
+        self.weight_method_combo.setEnabled(False)
+        self.weight_method_combo.setToolTip(weight_method_tooltip)
+        self.weight_stack_check.toggled.connect(self.weight_method_combo.setEnabled)
+        weight_layout.addWidget(self.weight_stack_check)
+        weight_layout.addWidget(self.weight_method_combo)
+        stack_layout.addLayout(weight_layout)
 
         save_calibrated_lights_tooltip = "Save calibrated light frames after processing. Allows you to collect everything even if you don't create stacks immediately."
         self.save_calibrated_lights_check = QCheckBox("Save calibrated lights")
@@ -1469,8 +1628,18 @@ class PreprocessingInterface(QMainWindow):
         stack_group.setLayout(stack_layout)
         processing_layout.addWidget(stack_group)
 
-        # Process button
-        process_btn = QPushButton("Process Files")
+        scroll_area.setWidget(scroll_content)
+        processing_tab_outer.addWidget(scroll_area)
+
+        # Process button (always visible, outside scroll area)
+        process_btn = QPushButton("Start Preprocessing")
+        process_btn.setMinimumHeight(38)
+        process_btn.setStyleSheet(
+            "QPushButton { background-color: #2563eb; color: #ffffff;"
+            " border: none; border-radius: 4px; font-weight: bold; font-size: 13px; }"
+            " QPushButton:hover { background-color: #1d4ed8; }"
+            " QPushButton:pressed { background-color: #1e40af; }"
+        )
         process_btn.clicked.connect(
             lambda: self.run_script(
                 bg_extract=self.bg_extract_check.isChecked(),
@@ -1492,9 +1661,11 @@ class PreprocessingInterface(QMainWindow):
                 or self.paneled_mosaic_radio.isChecked(),
                 save_calibrated_lights=self.save_calibrated_lights_check.isChecked(),
                 paneled_mosaic=self.paneled_mosaic_radio.isChecked(),
+                stack_weighted=self.weight_stack_check.isChecked(),
+                weighting_method=self.weight_method_combo.currentText(),
             )
         )
-        processing_layout.addWidget(process_btn)
+        processing_tab_outer.addWidget(process_btn)
 
         # Add tabs
         tab_widget.addTab(files_tab, "1. Files")
@@ -1570,8 +1741,8 @@ class PreprocessingInterface(QMainWindow):
             LogColor.GREEN,
         )
         self.siril.log(
-            """
-        Thank you for using the Naztronomy Smart Telescope Preprocessor! 
+            f"""
+        Thank you for using the {APP_NAME}!! 
         The author of this script is Nazmus Nasir (Naztronomy).
         Website: https://www.Naztronomy.com 
         YouTube: https://www.YouTube.com/Naztronomy 
@@ -1654,6 +1825,8 @@ class PreprocessingInterface(QMainWindow):
             ),
             "create_final_stack": self.create_final_stack_check.isChecked(),
             "save_calibrated_lights": self.save_calibrated_lights_check.isChecked(),
+            "stack_weighted": self.weight_stack_check.isChecked(),
+            "weighting_method": self.weight_method_combo.currentText(),
             # Add session information
             "sessions": [],
         }
@@ -1798,6 +1971,10 @@ class PreprocessingInterface(QMainWindow):
                 self.save_calibrated_lights_check.setChecked(
                     presets.get("save_calibrated_lights", False)
                 )
+                self.weight_stack_check.setChecked(presets.get("stack_weighted", False))
+                self.weight_method_combo.setCurrentText(
+                    presets.get("weighting_method", "Weighted FWHM")
+                )
 
                 # Load session data
                 sessions_data = presets.get("sessions", [])
@@ -1869,6 +2046,8 @@ class PreprocessingInterface(QMainWindow):
         process_separately: bool = False,
         save_calibrated_lights: bool = False,
         paneled_mosaic: bool = False,
+        stack_weighted: bool = False,
+        weighting_method: str = "Weighted FWHM",
     ):
         self.siril.log(
             f"Running script version {VERSION} with arguments:\n"
@@ -1886,6 +2065,7 @@ class PreprocessingInterface(QMainWindow):
             f"process_separately={process_separately}\n"
             f"save_calibrated_lights={save_calibrated_lights}\n"
             f"paneled_mosaic={paneled_mosaic}\n"
+            f"stack_weighted={stack_weighted} method={weighting_method}\n"
             f"build={VERSION}-{BUILD}",
             LogColor.BLUE,
         )
@@ -2120,6 +2300,8 @@ class PreprocessingInterface(QMainWindow):
                     rejection=True,
                     output_name=individual_stack_name,
                     overlap_norm=False,
+                    stack_weighted=stack_weighted,
+                    weighting_method=weighting_method,
                 )
 
                 # Save individual stack
@@ -2375,6 +2557,8 @@ class PreprocessingInterface(QMainWindow):
                 rejection=True,
                 output_name=stack_name,
                 overlap_norm=False,
+                stack_weighted=stack_weighted,
+                weighting_method=weighting_method,
             )
 
             self.load_image(image_name=stack_name)
@@ -2480,6 +2664,8 @@ class PreprocessingInterface(QMainWindow):
                     rejection=True,
                     output_name="final_stacked",
                     overlap_norm=False,
+                    stack_weighted=stack_weighted,
+                    weighting_method=weighting_method,
                 )
                 self.load_image(image_name="final_stacked")
                 self.siril.cmd("cd", f'"{self.home_directory}"')
@@ -2638,6 +2824,8 @@ class PreprocessingInterface(QMainWindow):
                         rejection=False,
                         output_name="paneled_mosaic_stacked",
                         overlap_norm=True,
+                        stack_weighted=stack_weighted,
+                        weighting_method=weighting_method,
                     )
 
                     # self.siril.cmd(
