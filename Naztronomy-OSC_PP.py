@@ -2825,6 +2825,7 @@ class PreprocessingInterface(QMainWindow):
 
                     # Stack with overlap_norm=True (happens in lights directory)
                     # stack r_lights_  rej none -norm=addscale -output_norm -overlap_norm -rgb_equal -maximize -filter-included -weight=wfwhm -out=paneled_mosaic_stacked -feather=70
+                    # Don't reject and don't weigh final panel stack
                     self.seq_stack(
                         seq_name=seq_name,
                         feather=feather,
@@ -2833,7 +2834,7 @@ class PreprocessingInterface(QMainWindow):
                         output_name="paneled_mosaic_stacked",
                         overlap_norm=True,
                         output_norm=output_norm,
-                        stack_weighted=stack_weighted,
+                        stack_weighted=False,
                         weighting_method=weighting_method,
                     )
 
