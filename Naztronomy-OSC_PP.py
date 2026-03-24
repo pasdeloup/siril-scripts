@@ -949,6 +949,7 @@ class PreprocessingInterface(QMainWindow):
         rejection=False,
         output_name=None,
         overlap_norm=False,
+        output_norm=True,
         stack_weighted=False,
         weighting_method="Weighted FWHM",
     ):
@@ -960,11 +961,12 @@ class PreprocessingInterface(QMainWindow):
             f"{seq_name}",
             " rej 3 3" if rejection else " rej none",
             "-norm=addscale",
-            "-output_norm",
+            "-output_norm" if output_norm else "",
             "-overlap_norm" if overlap_norm else "",
             "-rgb_equal",
             "-maximize",
             "-filter-included",
+            "-32b",
             f"-out={out}",
         ]
         if stack_weighted:
@@ -1567,6 +1569,12 @@ class PreprocessingInterface(QMainWindow):
         self.save_calibrated_lights_check.setToolTip(save_calibrated_lights_tooltip)
         stack_layout.addWidget(self.save_calibrated_lights_check)
 
+        output_norm_tooltip = "Normalize the output stack so pixel values are scaled relatively. Recommended for most use cases. Turn it OFF for photometry or if you see strange artifacts in where your background is clipping to zero."
+        self.output_norm_check = QCheckBox("Output normalization")
+        self.output_norm_check.setToolTip(output_norm_tooltip)
+        self.output_norm_check.setChecked(True)
+        stack_layout.addWidget(self.output_norm_check)
+
         # Target mode radio buttons
         target_mode_box = QGroupBox("Target Mode")
         target_mode_layout = QVBoxLayout()
@@ -1587,7 +1595,7 @@ class PreprocessingInterface(QMainWindow):
 
         self.paneled_mosaic_radio = QRadioButton("Paneled mosaic")
         self.paneled_mosaic_radio.setToolTip(
-            "Sessions are mosaic panels of the same target. Each session is stacked individually, then stitched into a mosaic. No drizzle or filters applied during stitching."
+            "Sessions are mosaic panels of the same target. Each session is stacked individually, then stitched into a mosaic. No drizzle or filters applied during stitching. Applies Overlap Normalization so your panels MUST have overlaps."
         )
         self.paneled_mosaic_radio.setEnabled(len(self.sessions) > 1)
 
@@ -1658,6 +1666,7 @@ class PreprocessingInterface(QMainWindow):
                 paneled_mosaic=self.paneled_mosaic_radio.isChecked(),
                 stack_weighted=self.weight_stack_check.isChecked(),
                 weighting_method=self.weight_method_combo.currentText(),
+                output_norm=self.output_norm_check.isChecked(),
             )
         )
         processing_tab_outer.addWidget(process_btn)
@@ -1820,6 +1829,7 @@ class PreprocessingInterface(QMainWindow):
             ),
             "create_final_stack": self.create_final_stack_check.isChecked(),
             "save_calibrated_lights": self.save_calibrated_lights_check.isChecked(),
+            "output_norm": self.output_norm_check.isChecked(),
             "stack_weighted": self.weight_stack_check.isChecked(),
             "weighting_method": self.weight_method_combo.currentText(),
             # Add session information
@@ -1963,6 +1973,7 @@ class PreprocessingInterface(QMainWindow):
                 self.save_calibrated_lights_check.setChecked(
                     presets.get("save_calibrated_lights", False)
                 )
+                self.output_norm_check.setChecked(presets.get("output_norm", True))
                 self.weight_stack_check.setChecked(presets.get("stack_weighted", False))
                 self.weight_method_combo.setCurrentText(
                     presets.get("weighting_method", "Weighted FWHM")
@@ -2040,6 +2051,7 @@ class PreprocessingInterface(QMainWindow):
         paneled_mosaic: bool = False,
         stack_weighted: bool = False,
         weighting_method: str = "Weighted FWHM",
+        output_norm: bool = True,
     ):
         self.siril.log(
             f"Running script version {VERSION} with arguments:\n"
@@ -2058,6 +2070,7 @@ class PreprocessingInterface(QMainWindow):
             f"save_calibrated_lights={save_calibrated_lights}\n"
             f"paneled_mosaic={paneled_mosaic}\n"
             f"stack_weighted={stack_weighted} method={weighting_method}\n"
+            f"output_norm={output_norm}\n"
             f"build={VERSION}-{BUILD}",
             LogColor.BLUE,
         )
@@ -2292,6 +2305,7 @@ class PreprocessingInterface(QMainWindow):
                     rejection=True,
                     output_name=individual_stack_name,
                     overlap_norm=False,
+                    output_norm=output_norm,
                     stack_weighted=stack_weighted,
                     weighting_method=weighting_method,
                 )
@@ -2549,6 +2563,7 @@ class PreprocessingInterface(QMainWindow):
                 rejection=True,
                 output_name=stack_name,
                 overlap_norm=False,
+                output_norm=output_norm,
                 stack_weighted=stack_weighted,
                 weighting_method=weighting_method,
             )
@@ -2656,6 +2671,7 @@ class PreprocessingInterface(QMainWindow):
                     rejection=True,
                     output_name="final_stacked",
                     overlap_norm=False,
+                    output_norm=output_norm,
                     stack_weighted=stack_weighted,
                     weighting_method=weighting_method,
                 )
@@ -2816,6 +2832,7 @@ class PreprocessingInterface(QMainWindow):
                         rejection=False,
                         output_name="paneled_mosaic_stacked",
                         overlap_norm=True,
+                        output_norm=output_norm,
                         stack_weighted=stack_weighted,
                         weighting_method=weighting_method,
                     )
@@ -2853,7 +2870,7 @@ class PreprocessingInterface(QMainWindow):
                             print(rf"Home directory: {self.home_directory}")
                             # home_dir = f"{self.home_directory}"
                             self.siril.cmd("cd", f'"{self.home_directory}"')
-                            self.save_image("paneled_mosaic_final")
+                            self.save_image("_paneled_mosaic_final")
                             self.siril.log(
                                 f"Paneled mosaic final stack saved to {final_location}",
                                 LogColor.GREEN,
@@ -2884,7 +2901,16 @@ class PreprocessingInterface(QMainWindow):
 
         # Delete the blank sessions dir
         if clean_up_files:
-            shutil.rmtree(os.path.join(self.current_working_directory, "sessions"))
+            try:
+                shutil.rmtree(
+                    os.path.join(self.current_working_directory, "sessions"),
+                    ignore_errors=True,
+                )
+            except Exception as e:
+                self.siril.log(
+                    f"Error cleaning up sessions directory {os.path.join(self.current_working_directory, 'sessions')}: {e}",
+                    LogColor.SALMON,
+                )
             extension = self.fits_extension.lstrip(".")
             collected_lights_dir = os.path.join(
                 self.current_working_directory, "collected_lights"
