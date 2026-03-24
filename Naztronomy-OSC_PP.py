@@ -72,8 +72,10 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QAbstractItemView,
+    QToolButton,
+    QMenu,
 )
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence
+from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QAction
 from datetime import datetime
 import time
 import os
@@ -1512,16 +1514,34 @@ class PreprocessingInterface(QMainWindow):
         help_button.clicked.connect(self.show_help)
         button_layout.addWidget(help_button)
 
-        save_presets_button = QPushButton("Save Presets")
-        save_presets_button.setMinimumWidth(80)
+        save_presets_button = QToolButton()
+        save_presets_button.setText("Save Presets")
+        save_presets_button.setMinimumWidth(100)
         save_presets_button.setMinimumHeight(35)
+        save_presets_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
         save_presets_button.clicked.connect(self.save_presets)
+        save_menu = QMenu(save_presets_button)
+        save_as_action = QAction("Save As...", self)
+        save_as_action.triggered.connect(self.save_presets_as)
+        save_menu.addAction(save_as_action)
+        save_presets_button.setMenu(save_menu)
         button_layout.addWidget(save_presets_button)
 
-        load_presets_button = QPushButton("Load Presets")
-        load_presets_button.setMinimumWidth(80)
+        load_presets_button = QToolButton()
+        load_presets_button.setText("Load Presets")
+        load_presets_button.setMinimumWidth(100)
         load_presets_button.setMinimumHeight(35)
+        load_presets_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
         load_presets_button.clicked.connect(self.load_presets)
+        load_menu = QMenu(load_presets_button)
+        load_from_action = QAction("Load From...", self)
+        load_from_action.triggered.connect(self.load_presets_from)
+        load_menu.addAction(load_from_action)
+        load_presets_button.setMenu(load_menu)
         button_layout.addWidget(load_presets_button)
 
         button_layout.addStretch()  # Add space between buttons
@@ -1599,8 +1619,9 @@ class PreprocessingInterface(QMainWindow):
             spinbox.setValue(100)
             spinbox.setSuffix(" %")
 
-    def save_presets(self):
-        """Save current UI settings and session data to a preset file"""
+    def save_presets(self, filepath=None):
+        """Save current UI settings and session data to a preset file.
+        If filepath is None, saves to the default location."""
         # Collect settings
         presets = {
             "bg_extract": self.bg_extract_check.isChecked(),
@@ -1648,47 +1669,83 @@ class PreprocessingInterface(QMainWindow):
             }
             presets["sessions"].append(session_data)
 
-        # Create presets directory if it doesn't exist
-        presets_dir = os.path.join(self.current_working_directory, "presets")
-        os.makedirs(presets_dir, exist_ok=True)
-        presets_file = os.path.join(presets_dir, "naztronomy_osc_pp_presets.json")
+        if not filepath:
+            cwd = self.current_working_directory
+            if not cwd:
+                self.siril.log(
+                    "No working directory set - use 'Save As...' to choose a location.",
+                    LogColor.SALMON,
+                )
+                self.save_presets_as()
+                return
+            presets_dir = os.path.join(cwd, "presets")
+            os.makedirs(presets_dir, exist_ok=True)
+            filepath = os.path.join(presets_dir, "naztronomy_osc_pp_presets.json")
 
         try:
-            with open(presets_file, "w") as f:
+            with open(filepath, "w") as f:
                 json.dump(presets, f, indent=4)
             self.siril.log(
-                f"Saved presets and session data to {presets_file}", LogColor.GREEN
+                f"Saved presets and session data to {filepath}", LogColor.GREEN
             )
         except Exception as e:
             self.siril.log(f"Failed to save presets: {e}", LogColor.RED)
 
-    def load_presets(self):
-        """Load settings and session data from a preset file"""
+    def save_presets_as(self):
+        """Save presets to a user-chosen file location."""
+        cwd = self.current_working_directory or ""
+        presets_dir = os.path.join(cwd, "presets") if cwd else ""
+        if presets_dir:
+            os.makedirs(presets_dir, exist_ok=True)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Presets As",
+            presets_dir or cwd or "",
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if filepath:
+            self.save_presets(filepath=filepath)
+
+    def load_presets(self, filepath=None):
+        """Load settings and session data from a preset file.
+        If filepath is None, loads from the default location (or shows dialog if not found).
+        """
+        print("here")
         try:
-            # Open file dialog to select presets file
-            # First check for default presets file
-            default_presets_file = os.path.join(
-                self.current_working_directory,
-                "presets",
-                "naztronomy_osc_pp_presets.json",
-            )
-
-            if os.path.exists(default_presets_file):
-                presets_file = default_presets_file
-            else:
-                # If default presets don't exist, show file dialog
-                presets_file, _ = QFileDialog.getOpenFileName(
-                    self,
-                    "Load Presets",
-                    os.path.join(self.current_working_directory, "presets"),
-                    "JSON Files (*.json);;All Files (*.*)",
+            if not filepath:
+                cwd = self.current_working_directory
+                print(cwd)
+                default_presets_file = (
+                    os.path.join(cwd, "presets", "naztronomy_osc_pp_presets.json")
+                    if cwd
+                    else None
                 )
+                print(f"Looking for presets file at: {default_presets_file}")
+                # Only use the default file if it exists and has content
+                if (
+                    default_presets_file
+                    and os.path.exists(default_presets_file)
+                    and os.path.getsize(default_presets_file) > 0
+                ):
+                    filepath = default_presets_file
+                else:
+                    if default_presets_file and os.path.exists(default_presets_file):
+                        self.siril.log(
+                            "Default presets file is empty — please choose a file.",
+                            LogColor.SALMON,
+                        )
+                    start_dir = os.path.join(cwd, "presets") if cwd else ""
+                    filepath, _ = QFileDialog.getOpenFileName(
+                        self,
+                        "Load Presets",
+                        start_dir,
+                        "JSON Files (*.json);;All Files (*.*)",
+                    )
+                    if not filepath:  # User canceled
+                        self.siril.log("Preset loading canceled", LogColor.BLUE)
+                        return
 
-                if not presets_file:  # User canceled
-                    self.siril.log("Preset loading canceled", LogColor.BLUE)
-                    return
-
-            with open(presets_file) as f:
+            with open(filepath) as f:
                 presets = json.load(f)
 
                 # Load UI settings
@@ -1773,11 +1830,24 @@ class PreprocessingInterface(QMainWindow):
                     self.update_process_separately_checkbox()
 
                 self.siril.log(
-                    f"Loaded presets and {len(sessions_data)} sessions from {presets_file}",
+                    f"Loaded presets and {len(sessions_data)} sessions from {filepath}",
                     LogColor.GREEN,
                 )
         except Exception as e:
             self.siril.log(f"Error loading presets: {str(e)}", LogColor.RED)
+
+    def load_presets_from(self):
+        """Load presets from a user-chosen file."""
+        cwd = self.current_working_directory or ""
+        presets_dir = os.path.join(cwd, "presets") if cwd else ""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Presets From",
+            (presets_dir if presets_dir and os.path.exists(presets_dir) else cwd),
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if filepath:
+            self.load_presets(filepath=filepath)
 
     def run_script(
         self,
