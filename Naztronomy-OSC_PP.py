@@ -2030,6 +2030,7 @@ class PreprocessingInterface(QMainWindow):
         if filepath:
             self.load_presets(filepath=filepath)
 
+    # TODO: Replace paneled_mosaic boolean with target_mode enum for clarity and scalability
     def run_script(
         self,
         bg_extract: bool = False,
@@ -2070,6 +2071,9 @@ class PreprocessingInterface(QMainWindow):
             f"process_separately={process_separately}\n"
             f"save_calibrated_lights={save_calibrated_lights}\n"
             f"paneled_mosaic={paneled_mosaic}\n"
+            f"create_final_stack={self.create_final_stack_check.isChecked()}\n"
+            f"save_calibrated_lights={self.save_calibrated_lights_check.isChecked()}\n"
+            f"target_mode={'paneled mosaic' if self.paneled_mosaic_radio.isChecked() else 'multi target' if self.multi_target_radio.isChecked() else 'mono' if self.mono_radio.isChecked() else 'single target'}\n"
             f"stack_weighted={stack_weighted} method={weighting_method}\n"
             f"output_norm={output_norm}\n"
             f"build={VERSION}-{BUILD}",
