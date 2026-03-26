@@ -92,7 +92,7 @@ from typing import List, Dict
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
 VERSION = "2.0.1"
-BUILD = "20260324"
+BUILD = "20260326"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "https://www.Naztronomy.com"
 YOUTUBE = "https://www.YouTube.com/Naztronomy"
@@ -655,6 +655,7 @@ class PreprocessingInterface(QMainWindow):
             "-kernel=square",
         ]
 
+        # Sigma or Percentage for each filter type (if enabled)
         if use_filter_round:
             if self.roundness_mode_combo.currentText() == "σ":
                 cmd_args.append(f"-filter-round={filter_round}k")
@@ -1647,14 +1648,14 @@ class PreprocessingInterface(QMainWindow):
             lambda: self.run_script(
                 bg_extract=self.bg_extract_check.isChecked(),
                 drizzle=self.drizzle_checkbox.isChecked(),
-                drizzle_amount=self.drizzle_amount_spinbox.value(),
-                pixel_fraction=self.pixel_fraction_spinbox.value(),
+                drizzle_amount=round(self.drizzle_amount_spinbox.value(), 1),
+                pixel_fraction=round(self.pixel_fraction_spinbox.value(), 2),
                 feather=self.feather_checkbox.isChecked(),
-                feather_amount=self.feather_amount_spinbox.value(),
-                filter_round=self.roundness_spinbox.value(),
-                filter_wfwhm=self.fwhm_spinbox.value(),
-                filter_stars=self.stars_spinbox.value(),
-                filter_bkg=self.bkg_spinbox.value(),
+                feather_amount=round(self.feather_amount_spinbox.value(), 0),
+                filter_round=round(self.roundness_spinbox.value(), 1),
+                filter_wfwhm=round(self.fwhm_spinbox.value(), 1),
+                filter_stars=round(self.stars_spinbox.value(), 1),
+                filter_bkg=round(self.bkg_spinbox.value(), 1),
                 use_filter_round=self.roundness_check.isChecked(),
                 use_filter_wfwhm=self.fwhm_check.isChecked(),
                 use_filter_stars=self.stars_check.isChecked(),
@@ -1804,7 +1805,7 @@ class PreprocessingInterface(QMainWindow):
             "drizzle_amount": round(self.drizzle_amount_spinbox.value(), 1),
             "pixel_fraction": round(self.pixel_fraction_spinbox.value(), 2),
             "feather": self.feather_checkbox.isChecked(),
-            "feather_amount": round(self.feather_amount_spinbox.value(), 2),
+            "feather_amount": round(self.feather_amount_spinbox.value(), 0),
             "filter_round": round(self.roundness_spinbox.value(), 1),
             "filter_wfwhm": round(self.fwhm_spinbox.value(), 1),
             "filter_stars": round(self.stars_spinbox.value(), 1),
