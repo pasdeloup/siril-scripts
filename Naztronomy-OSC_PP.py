@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 
 Naztronomy - OSC Image Preprocessing script
-Version: 2.0.1
+Version: 2.0.2
 =====================================
 
 The author of this script is Nazmus Nasir (Naztronomy) and can be reached at:
@@ -27,6 +27,20 @@ allows you to choose files from any folder and drive and they will all be consol
 
 """
 CHANGELOG:
+
+2.0.2 - Files tab UI overhaul
+      - Drag and drop files directly onto the file list
+      - Frame type selection dialog on drop (Lights, Darks, Flats, Biases)
+      - Master calibration frame support via drag & drop (Master Dark, Master Flat, Master Bias)
+      - Master frames can be applied to the current session, selected sessions (checkboxes), or all sessions
+      - File list rows color-coded by frame type (green=Lights, blue=Darks, amber=Flats, purple=Biases)
+      - Custom item delegate: visible selection highlight and hover effect on file list rows
+      - Green circle indicator on Add buttons when that frame type has files loaded
+      - Empty-state placeholder text on the file list
+      - Drag-hover border highlight on the file list drop zone
+      - Files tab split into two group boxes: Session Management (top) and Files in Session N (bottom)
+      - Session content group box title updates dynamically to show current session number
+      - Next / Back single toggle button for navigating between tabs (styled white with dark border)
 2.0.1 - Single/Multi/Paneled mosaic workflows 
       - Allow stacking multiple targets at the same time (without combining them at the end)
       - Single target session can combine everything at once or do it by session/panel
@@ -61,6 +75,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
     QListWidget,
+    QListWidgetItem,
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
@@ -77,8 +92,21 @@ from PyQt6.QtWidgets import (
     QTextBrowser,
     QSizePolicy,
     QScrollArea,
+    QStyledItemDelegate,
+    QStyle,
 )
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QAction, QDesktopServices
+from PyQt6.QtGui import (
+    QFont,
+    QShortcut,
+    QKeySequence,
+    QAction,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QPainter,
+    QColor,
+    QBrush,
+)
 from datetime import datetime
 import time
 import os
@@ -91,8 +119,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
-VERSION = "2.0.1"
-BUILD = "20260326"
+VERSION = "2.0.2"
+BUILD = "20260331"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "https://www.Naztronomy.com"
 YOUTUBE = "https://www.YouTube.com/Naztronomy"
@@ -155,6 +183,248 @@ class Session:
         self.darks.clear()
         self.flats.clear()
         self.biases.clear()
+
+
+class FileListDelegate(QStyledItemDelegate):
+    """Paints row colors from item data, with visible selection and hover highlights."""
+
+    _SEL_BG = QColor("#2563eb")
+    _SEL_FG = QColor("#ffffff")
+    _HOVER_BG = QColor(0, 0, 0, 45)  # semi-transparent dark tint for hover
+
+    def paint(self, painter, option, index):
+        painter.save()
+
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        # --- background ---
+        if selected:
+            painter.fillRect(option.rect, self._SEL_BG)
+        else:
+            bg = index.data(Qt.ItemDataRole.BackgroundRole)
+            if bg is not None:
+                painter.fillRect(
+                    option.rect, bg if isinstance(bg, QColor) else bg.color()
+                )
+            if hovered:
+                painter.fillRect(option.rect, self._HOVER_BG)
+
+        # --- text color ---
+        if selected:
+            text_color = self._SEL_FG
+        else:
+            fg = index.data(Qt.ItemDataRole.ForegroundRole)
+            if fg is not None:
+                text_color = fg if isinstance(fg, QColor) else fg.color()
+            else:
+                text_color = option.palette.color(option.palette.ColorRole.Text)
+
+        text_rect = option.rect.adjusted(4, 0, -4, 0)
+        painter.setPen(text_color)
+        font = index.data(Qt.ItemDataRole.FontRole)
+        if font:
+            painter.setFont(font)
+        painter.drawText(
+            text_rect,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            index.data(Qt.ItemDataRole.DisplayRole) or "",
+        )
+
+        painter.restore()
+
+
+class FileTypeDialog(QDialog):
+    """Prompt the user to choose a frame type for drag-and-dropped files."""
+
+    FRAME_TYPES = ["Lights", "Darks", "Flats", "Biases"]
+    MASTER_TYPES = ["Master Dark", "Master Flat", "Master Bias"]
+
+    def __init__(
+        self,
+        file_count: int,
+        current_session_name: str = "Current Session",
+        all_session_names: list | None = None,
+        current_session_index: int = 0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._current_session_name = current_session_name
+        self._all_session_names = all_session_names or [current_session_name]
+        self._current_session_index = current_session_index
+        self.setWindowTitle("Select Frame Type")
+        self.setModal(True)
+        self.chosen_type: str | None = None
+        self.chosen_scope: str = "current"  # "current", "selected", or "all"
+        self.chosen_session_indices: list = [current_session_index]
+
+        layout = QVBoxLayout(self)
+        plural = "s" if file_count != 1 else ""
+        layout.addWidget(
+            QLabel(
+                f"You dropped {file_count} file{plural}.\nWhat type of frames are these?"
+            )
+        )
+
+        for frame_type in self.FRAME_TYPES:
+            btn = QPushButton(frame_type)
+            btn.setMinimumHeight(32)
+            btn.clicked.connect(lambda checked, t=frame_type: self._select(t))
+            layout.addWidget(btn)
+
+        sep = QLabel("— Master calibration frames —")
+        sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sep.setStyleSheet(
+            "color: #888; font-style: italic; font-size: 11px; margin-top: 4px;"
+        )
+        layout.addWidget(sep)
+
+        for master_type in self.MASTER_TYPES:
+            btn = QPushButton(master_type)
+            btn.setMinimumHeight(32)
+            btn.setStyleSheet(
+                "QPushButton { background-color: #e8f4e8; color: #1d4e2d; }"
+                " QPushButton:hover { background-color: #c3e6cb; }"
+            )
+            btn.clicked.connect(lambda checked, t=master_type: self._select_master(t))
+            layout.addWidget(btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        layout.addWidget(cancel_btn)
+
+    def _select(self, frame_type: str):
+        self.chosen_type = frame_type
+        self.chosen_scope = "current"
+        self.accept()
+
+    def _select_master(self, frame_type: str):
+        sub = QDialog(self)
+        sub.setWindowTitle("Apply to which sessions?")
+        sub.setModal(True)
+        sub_layout = QVBoxLayout(sub)
+
+        sub_layout.addWidget(QLabel(f"Add <b>{frame_type}</b> to:"))
+
+        checkboxes: list[QCheckBox] = []
+        for i, name in enumerate(self._all_session_names):
+            cb = QCheckBox(name)
+            cb.setChecked(i == self._current_session_index)
+            checkboxes.append(cb)
+            sub_layout.addWidget(cb)
+
+        btn_row = QHBoxLayout()
+        selected_btn = QPushButton("Selected Sessions")
+        all_btn = QPushButton("All Sessions")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(selected_btn)
+        btn_row.addWidget(all_btn)
+        btn_row.addWidget(cancel_btn)
+        sub_layout.addLayout(btn_row)
+
+        result = {"action": None}
+
+        def on_selected():
+            result["action"] = "selected"
+            sub.accept()
+
+        def on_all():
+            result["action"] = "all"
+            sub.accept()
+
+        selected_btn.clicked.connect(on_selected)
+        all_btn.clicked.connect(on_all)
+        cancel_btn.clicked.connect(sub.reject)
+
+        if sub.exec() != QDialog.DialogCode.Accepted:
+            return  # stay in outer dialog
+
+        if result["action"] == "all":
+            self.chosen_type = frame_type
+            self.chosen_scope = "all"
+            self.chosen_session_indices = list(range(len(self._all_session_names)))
+            self.accept()
+        elif result["action"] == "selected":
+            indices = [i for i, cb in enumerate(checkboxes) if cb.isChecked()]
+            if not indices:
+                return  # nothing checked — stay in dialog
+            self.chosen_type = frame_type
+            self.chosen_scope = "selected"
+            self.chosen_session_indices = indices
+            self.accept()
+        # else: cancel — stay in outer dialog
+
+
+class DragDropListWidget(QListWidget):
+    """A QListWidget that accepts file drag-and-drop and emits the dropped paths."""
+
+    _NORMAL_STYLE = ""
+    _HOVER_STYLE = (
+        "QListWidget { border: 2px dashed #2563eb;"
+        " background-color: rgba(37, 99, 235, 0.07); }"
+    )
+
+    def __init__(self, on_drop_callback, parent=None):
+        super().__init__(parent)
+        self._on_drop = on_drop_callback
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.count() == 0:
+            painter = QPainter(self.viewport())
+            painter.save()
+            pen_color = self.palette().color(self.palette().ColorRole.PlaceholderText)
+            painter.setPen(pen_color)
+            font = painter.font()
+            font.setPointSize(9)
+            font.setItalic(True)
+            painter.setFont(font)
+            painter.drawText(
+                self.viewport().rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "Drop files here\nor use the Add buttons above",
+            )
+            painter.restore()
+
+    def dragEnterEvent(self, event: QDragEnterEvent | None):
+        if event is None:
+            return
+        mime = event.mimeData()
+        if mime is not None and mime.hasUrls():
+            self.setStyleSheet(self._HOVER_STYLE)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event is None:
+            return
+        mime = event.mimeData()
+        if mime is not None and mime.hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet(self._NORMAL_STYLE)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent | None):
+        self.setStyleSheet(self._NORMAL_STYLE)
+        if event is None:
+            return
+        mime = event.mimeData()
+        if mime is None or not mime.hasUrls():
+            event.ignore()
+            return
+        paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+        if paths:
+            event.acceptProposedAction()
+            self._on_drop(paths)
+        else:
+            event.ignore()
 
 
 class PreprocessingInterface(QMainWindow):
@@ -376,6 +646,62 @@ class PreprocessingInterface(QMainWindow):
         self.session_dropdown.clear()  # remove old items
         self.session_dropdown.addItems(session_names)  # add new items
 
+    def _handle_dropped_files(self, paths: list):
+        """Called by DragDropListWidget when files are dropped onto the list."""
+        dlg = FileTypeDialog(
+            file_count=len(paths),
+            current_session_name=self.session_dropdown.currentText(),
+            all_session_names=[f"Session {i+1}" for i in range(len(self.sessions))],
+            current_session_index=self.session_dropdown.currentIndex(),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.chosen_type is None:
+            return
+        filetype = dlg.chosen_type
+        scope = dlg.chosen_scope
+
+        # Determine which sessions to apply to
+        if scope == "all":
+            target_sessions = self.sessions
+        elif scope == "selected":
+            target_sessions = [self.sessions[i] for i in dlg.chosen_session_indices]
+        else:
+            target_sessions = [self.chosen_session]
+
+        # Map master types to their underlying calibration list
+        _master_map = {
+            "master dark": "darks",
+            "master flat": "flats",
+            "master bias": "biases",
+        }
+        resolved_type = _master_map.get(filetype.lower(), filetype.lower())
+
+        for session in target_sessions:
+            match resolved_type:
+                case "lights":
+                    session.lights.extend(paths)
+                case "darks":
+                    session.darks.extend(paths)
+                case "flats":
+                    session.flats.extend(paths)
+                case "biases":
+                    session.biases.extend(paths)
+
+        if scope == "all":
+            session_label = "all sessions"
+        elif scope == "selected":
+            session_label = ", ".join(
+                f"Session {i+1}" for i in dlg.chosen_session_indices
+            )
+        else:
+            session_label = self.session_dropdown.currentText()
+
+        self.siril.log(
+            f"> Added {len(paths)} {filetype} files to {session_label} (drag & drop)",
+            LogColor.BLUE,
+        )
+        self.refresh_file_list()
+
     def load_files(self, filetype: str):
         file_dialog = QFileDialog()
         file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
@@ -450,18 +776,55 @@ class PreprocessingInterface(QMainWindow):
                     f"Skipping {image_type}: no files found", LogColor.SALMON
                 )
 
+    # Background/foreground colors per frame type
+    _FRAME_COLORS = {
+        "lights": ("#c3e6cb", "#1d4e2d"),
+        "darks": ("#b8daff", "#003680"),
+        "flats": ("#ffeaa7", "#7d5a00"),
+        "biases": ("#d1c4e9", "#311b5e"),
+    }
+
     def refresh_file_list(self):
-        self.file_listbox.clear()  # clear QListWidget instead of delete()
+        self.file_listbox.clear()
         self.siril.log(f"Switched to session {self.chosen_session}", LogColor.BLUE)
+
+        # Update the session content group box title
+        if hasattr(self, "session_content_group"):
+            idx = self.session_dropdown.currentIndex() + 1
+            self.session_content_group.setTitle(f"Files in Session {idx}")
 
         if self.chosen_session:
             for file_type in FRAME_TYPES:
                 files = self.chosen_session.get_files_by_type(file_type)
                 if files:
-                    for index, file in enumerate(files):
-                        self.file_listbox.addItem(
-                            f"{index + 1:>4}. {file_type.capitalize():^20}  {str(file.resolve())}"
+                    bg_hex, fg_hex = self._FRAME_COLORS.get(
+                        file_type, ("#ffffff", "#000000")
+                    )
+                    bg = QBrush(QColor(bg_hex))
+                    fg = QBrush(QColor(fg_hex))
+                    for idx, file in enumerate(files):
+                        item = QListWidgetItem(
+                            f"{idx + 1:>4}. {file_type.capitalize():^20}  {str(file.resolve())}"
                         )
+                        item.setBackground(bg)
+                        item.setForeground(fg)
+                        self.file_listbox.addItem(item)
+
+        self.update_frame_buttons()
+
+    def update_frame_buttons(self):
+        """Show a green circle on each Add button when that frame type has files loaded."""
+        if not hasattr(self, "lights_btn"):
+            return
+        btn_map = {
+            "lights": (self.lights_btn, "Add Lights"),
+            "darks": (self.darks_btn, "Add Darks"),
+            "flats": (self.flats_btn, "Add Flats"),
+            "biases": (self.biases_btn, "Add Biases"),
+        }
+        for file_type, (btn, label) in btn_map.items():
+            files = self.chosen_session.get_files_by_type(file_type)
+            btn.setText(f"\U0001f7e2 {label}" if files else label)
 
     # Debug code
     def show_all_sessions(self):
@@ -1264,52 +1627,75 @@ class PreprocessingInterface(QMainWindow):
         # Files tab
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
+        files_layout.setSpacing(8)
 
-        # Session selection row
+        # ── Top container: Session Management ──────────────────────────────
+        session_mgmt_group = QGroupBox("Session Management")
+        session_mgmt_layout = QVBoxLayout(session_mgmt_group)
+        session_mgmt_layout.setContentsMargins(10, 8, 10, 8)
+
         session_row = QHBoxLayout()
         session_label = QLabel("Session:")
-        # self.session_dropdown = QComboBox()
-        # self.session_dropdown.addItems([f"Session {i+1}" for i in range(len(self.sessions))])
-        # self.session_dropdown.currentIndexChanged.connect(self.on_session_selected)
-        # Now populate the dropdown here
-        self.update_dropdown()  # Add this line
-        self.session_dropdown.setCurrentIndex(0)  # Set initial selection
+        self.update_dropdown()
+        self.session_dropdown.setCurrentIndex(0)
 
         add_session_btn = QPushButton("+ Add Session")
         add_session_btn.clicked.connect(self.add_dropdown_session)
-        remove_session_btn = QPushButton("– Remove Session")
+        remove_session_btn = QPushButton("\u2013 Remove Session")
         remove_session_btn.clicked.connect(self.remove_session)
 
         session_row.addWidget(session_label)
         session_row.addWidget(self.session_dropdown)
         session_row.addWidget(add_session_btn)
         session_row.addWidget(remove_session_btn)
-        files_layout.addLayout(session_row)
+        session_mgmt_layout.addLayout(session_row)
+
+        files_layout.addWidget(session_mgmt_group)
+
+        # ── Bottom container: Session Content ──────────────────────────────
+        self.session_content_group = QGroupBox("Files in Session 1")
+        session_content_layout = QVBoxLayout(self.session_content_group)
+        session_content_layout.setContentsMargins(10, 8, 10, 8)
+        session_content_layout.setSpacing(6)
 
         # Frame buttons
         frame_buttons = QHBoxLayout()
-        lights_btn = QPushButton("Add Lights")
-        lights_btn.clicked.connect(lambda: self.load_files("Lights"))
-        darks_btn = QPushButton("Add Darks")
-        darks_btn.clicked.connect(lambda: self.load_files("Darks"))
-        flats_btn = QPushButton("Add Flats")
-        flats_btn.clicked.connect(lambda: self.load_files("Flats"))
-        biases_btn = QPushButton("Add Biases")
-        biases_btn.clicked.connect(lambda: self.load_files("Biases"))
-        biases_btn.setToolTip("Bias frames or Dark Flats can be used.")
+        self.lights_btn = QPushButton("Add Lights")
+        self.lights_btn.clicked.connect(lambda: self.load_files("Lights"))
+        self.darks_btn = QPushButton("Add Darks")
+        self.darks_btn.clicked.connect(lambda: self.load_files("Darks"))
+        self.flats_btn = QPushButton("Add Flats")
+        self.flats_btn.clicked.connect(lambda: self.load_files("Flats"))
+        self.biases_btn = QPushButton("Add Biases")
+        self.biases_btn.clicked.connect(lambda: self.load_files("Biases"))
+        self.biases_btn.setToolTip("Bias frames or Dark Flats can be used.")
 
-        for btn in [lights_btn, darks_btn, flats_btn, biases_btn]:
+        for btn in [self.lights_btn, self.darks_btn, self.flats_btn, self.biases_btn]:
             frame_buttons.addWidget(btn)
-        files_layout.addLayout(frame_buttons)
+        session_content_layout.addLayout(frame_buttons)
+
+        drop_hint_label = QLabel(
+            "\u2193  or drag & drop files directly onto the list below"
+        )
+        drop_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_hint_label.setStyleSheet(
+            "color: #888; font-style: italic; font-size: 11px;"
+        )
+        session_content_layout.addWidget(drop_hint_label)
 
         # Files list
-        list_group = QGroupBox("Files in Current Session")
-        list_layout = QVBoxLayout()
-        self.file_listbox = QListWidget()
+        self.file_listbox = DragDropListWidget(
+            on_drop_callback=self._handle_dropped_files
+        )
         self.file_listbox.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        list_layout.addWidget(self.file_listbox)
+        self.file_listbox.setToolTip(
+            "Drag and drop files here to add them to the current session."
+        )
+        self.file_listbox.setItemDelegate(FileListDelegate(self.file_listbox))
+        self.file_listbox.viewport().setMouseTracking(True)
+        session_content_layout.addWidget(self.file_listbox)
 
         file_buttons = QHBoxLayout()
         remove_btn = QPushButton("Remove Selected File(s)")
@@ -1320,10 +1706,9 @@ class PreprocessingInterface(QMainWindow):
 
         file_buttons.addWidget(remove_btn)
         file_buttons.addWidget(reset_btn)
-        list_layout.addLayout(file_buttons)
+        session_content_layout.addLayout(file_buttons)
 
-        list_group.setLayout(list_layout)
-        files_layout.addWidget(list_group)
+        files_layout.addWidget(self.session_content_group)
 
         # Processing tab
         processing_tab = QWidget()
@@ -1675,6 +2060,7 @@ class PreprocessingInterface(QMainWindow):
         # Add tabs
         tab_widget.addTab(files_tab, "1. Files")
         tab_widget.addTab(processing_tab, "2. Processing")
+        self.tab_widget = tab_widget
         main_layout.addWidget(tab_widget)
 
         # Bottom buttons
@@ -1720,18 +2106,50 @@ class PreprocessingInterface(QMainWindow):
         load_presets_button.setMenu(load_menu)
         button_layout.addWidget(load_presets_button)
 
-        button_layout.addStretch()  # Add space between buttons
+        button_layout.addStretch()
 
         close_button = QPushButton("Close")
         close_button.setMinimumWidth(100)
         close_button.setMinimumHeight(35)
         close_button.clicked.connect(self.close_dialog)
-        # button_layout.addWidget(close_button)
-
-        # button_layout.addWidget(help_button)
-        button_layout.addStretch()
         button_layout.addWidget(close_button)
-        # main_layout.addLayout(button_layout)
+
+        _NAV_STYLE = (
+            "QPushButton {"
+            "  background-color: #ffffff;"
+            "  color: #000000;"
+            "  border: 2px solid #1e3a8a;"
+            "  border-radius: 4px;"
+            "  font-weight: 800;"
+            "  font-size: 13px;"
+            "  padding: 0 14px;"
+            "}"
+            "QPushButton:hover { background-color: #eff6ff; }"
+            "QPushButton:pressed { background-color: #dbeafe; }"
+        )
+
+        self.nav_button = QPushButton("Next \u2192")
+        self.nav_button.setMinimumWidth(100)
+        self.nav_button.setMinimumHeight(35)
+        self.nav_button.setStyleSheet(_NAV_STYLE)
+        self.nav_button.clicked.connect(self._tab_nav)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        button_layout.addWidget(self.nav_button)
+
+    def _tab_nav(self):
+        idx = self.tab_widget.currentIndex()
+        last = self.tab_widget.count() - 1
+        if idx < last:
+            self.tab_widget.setCurrentIndex(idx + 1)
+        else:
+            self.tab_widget.setCurrentIndex(idx - 1)
+
+    def _on_tab_changed(self, idx: int):
+        last = self.tab_widget.count() - 1
+        if idx < last:
+            self.nav_button.setText("Next \u2192")
+        else:
+            self.nav_button.setText("\u2190 Back")
 
     def close_dialog(self):
         try:
@@ -2374,7 +2792,9 @@ class PreprocessingInterface(QMainWindow):
             fits_files = [
                 fname
                 for fname in os.listdir(mono_dir)
-                if fname.startswith("mono_") and fname.endswith(self.fits_extension)
+                if fname.startswith("mono_")
+                and fname.endswith(self.fits_extension)
+                and not fname.startswith(".")
             ]
             self.siril.log(
                 f"Found {len(fits_files)} mono_*.fits files in {mono_dir}",
@@ -2605,7 +3025,7 @@ class PreprocessingInterface(QMainWindow):
             fits_files = [
                 fname
                 for fname in os.listdir(individual_stacks_dir)
-                if fname.endswith(self.fits_extension)
+                if fname.endswith(self.fits_extension) and not fname.startswith(".")
             ]
             self.siril.log(
                 f"Found {len(fits_files)} individual stack(s) to combine: {fits_files}",
@@ -2713,6 +3133,7 @@ class PreprocessingInterface(QMainWindow):
                     for fname in os.listdir(individual_stacks_dir)
                     if fname.endswith(self.fits_extension)
                     and fname.startswith(search_prefix)
+                    and not fname.startswith(".")
                 ]
 
                 self.siril.log(
