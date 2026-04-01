@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 
 Naztronomy - OSC Image Preprocessing script
-Version: 2.0.0
+Version: 2.0.1
 =====================================
 
 The author of this script is Nazmus Nasir (Naztronomy) and can be reached at:
@@ -27,7 +27,11 @@ allows you to choose files from any folder and drive and they will all be consol
 
 """
 CHANGELOG:
-2.0.1 - Threading on Black Frames check
+2.0.1 - Single/Multi/Paneled mosaic workflows 
+      - Allow stacking multiple targets at the same time (without combining them at the end)
+      - Single target session can combine everything at once or do it by session/panel
+      - Paneled mosaic will crop down to reference frame size to avoid noisy edges and speed up processing
+      - Paneled mosaic automatically applies overlap normalization 
       - Final Stack Checkbox
       - Delay between stacks to reduce IO errors
 2.0.0 - pyqt6 support
@@ -45,8 +49,7 @@ from pathlib import Path
 import shutil
 import sirilpy as s
 
-s.ensure_installed("PyQt6", "numpy", "astropy")
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -61,13 +64,21 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
+    QRadioButton,
+    QButtonGroup,
     QTabWidget,
     QGroupBox,
     QFileDialog,
     QMessageBox,
     QAbstractItemView,
+    QToolButton,
+    QMenu,
+    QDialog,
+    QTextBrowser,
+    QSizePolicy,
+    QScrollArea,
 )
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence
+from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QAction, QDesktopServices
 from datetime import datetime
 import time
 import os
@@ -78,25 +89,26 @@ from astropy.io import fits
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
-
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
-VERSION = "2.0.0"
-BUILD = "20251025"
+VERSION = "2.0.1"
+BUILD = "20260326"
 AUTHOR = "Nazmus Nasir"
-WEBSITE = "Naztronomy.com"
-YOUTUBE = "YouTube.com/Naztronomy"
+WEBSITE = "https://www.Naztronomy.com"
+YOUTUBE = "https://www.YouTube.com/Naztronomy"
+DISCORD = "https://discord.gg/yXKqrawpjr"
+PATREON = "https://www.patreon.com/c/naztronomy"
+BUY_ME_A_COFFEE = "https://www.buymeacoffee.com/naztronomy"
 
 
 UI_DEFAULTS = {
     "feather_amount": 20,
     "filter_round": 3.0,
     "filter_wfwhm": 3.0,
+    "filter_stars": 3.0,
+    "filter_bkg": 3.0,
     "drizzle_amount": 1.0,
     "pixel_fraction": 1.0,
-    "max_files_per_batch": 2000,
 }
 FRAME_TYPES = ("lights", "darks", "flats", "biases")
 
@@ -157,8 +169,6 @@ class PreprocessingInterface(QMainWindow):
         # if drizzle is off, images will be debayered on convert
         self.drizzle_status = False
         self.drizzle_factor = 0
-
-        self.target_coords = None
 
         try:
             self.siril.connect()
@@ -461,8 +471,9 @@ class PreprocessingInterface(QMainWindow):
                 if files:
                     self.siril.log(f"--- {file_type.upper()} ---", LogColor.BLUE)
                     for index, file in enumerate(files):
-                        print(
-                            f"{index + 1:>4}. {file_type.capitalize():^20}  {str(file.resolve())}"
+                        self.siril.log(
+                            f"{index + 1:>4}. {file_type.capitalize():^20}  {str(file.resolve())}",
+                            LogColor.BLUE,
                         )
 
     def remove_selected_files(self):
@@ -522,12 +533,15 @@ class PreprocessingInterface(QMainWindow):
         directory = os.path.join(self.current_working_directory, image_type)
         self.siril.log(f'Converting files in "{directory}"', LogColor.BLUE)
         if os.path.isdir(directory):
+            print(f"Found directory for {image_type}: {directory}")
             self.siril.cmd("cd", f'"{directory}"')
+            # Ignore hidden files and dirs
             file_count = len(
                 [
                     name
                     for name in os.listdir(directory)
                     if os.path.isfile(os.path.join(directory, name))
+                    and not name.startswith(".")
                 ]
             )
             if file_count == 0:
@@ -561,7 +575,7 @@ class PreprocessingInterface(QMainWindow):
                 try:
                     # using `link` to only get fits files
                     args = ["link", image_type, "-out=../process"]
-                    #args = ["convert", image_type, "-out=../process"]
+                    # args = ["convert", image_type, "-out=../process"]
                     # if "lights" in image_type.lower():
                     #     if not self.drizzle_status:
                     #         args.append("-debayer")
@@ -621,17 +635,52 @@ class PreprocessingInterface(QMainWindow):
         self.siril.log("Background extracted from Sequence", LogColor.GREEN)
 
     def seq_apply_reg(
-        self, seq_name, drizzle_amount, pixel_fraction, filter_wfwhm=3, filter_round=3
+        self,
+        seq_name,
+        drizzle_amount,
+        pixel_fraction,
+        filter_wfwhm=3,
+        filter_round=3,
+        filter_stars=3,
+        filter_bkg=3,
+        use_filter_round=False,
+        use_filter_wfwhm=False,
+        use_filter_stars=False,
+        use_filter_bkg=False,
     ):
         """Apply Existing Registration to the sequence."""
         cmd_args = [
             "seqapplyreg",
             seq_name,
-            f"-filter-round={filter_round}k",
-            f"-filter-wfwhm={filter_wfwhm}k",
             "-kernel=square",
-            "-framing=max",
         ]
+
+        # Sigma or Percentage for each filter type (if enabled)
+        if use_filter_round:
+            if self.roundness_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-round={filter_round}k")
+            else:
+                cmd_args.append(f"-filter-round={int(filter_round)}%")
+        if use_filter_wfwhm:
+            if self.fwhm_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-wfwhm={filter_wfwhm}k")
+            else:
+                cmd_args.append(f"-filter-wfwhm={int(filter_wfwhm)}%")
+        if use_filter_stars:
+            if self.stars_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-nbstars={filter_stars}k")
+            else:
+                cmd_args.append(f"-filter-nbstars={int(filter_stars)}%")
+        if use_filter_bkg:
+            if self.bkg_mode_combo.currentText() == "σ":
+                cmd_args.append(f"-filter-bkg={filter_bkg}k")
+            else:
+                cmd_args.append(f"-filter-bkg={int(filter_bkg)}%")
+
+        # If not doing a paneled mosaic, use max framing, otherwise crop down to reference frame so edges don't have ugly noise
+        if not self.paneled_mosaic_radio.isChecked():
+            cmd_args.append("-framing=max")
+
         if self.drizzle_status:
             cmd_args.extend(
                 ["-drizzle", f"-scale={drizzle_amount}", f"-pixfrac={pixel_fraction}"]
@@ -665,36 +714,6 @@ class PreprocessingInterface(QMainWindow):
 
         self.siril.log("Registered Sequence", LogColor.GREEN)
 
-    def process_frame(self, idx, filename, seq_name, folder, threshold, crop_fraction):
-        """Process a single frame and return results"""
-        if not filename.startswith(seq_name) or not filename.lower().endswith(
-            self.fits_extension
-        ):
-            return None
-
-        filepath = os.path.join(folder, filename)
-        try:
-            with fits.open(filepath) as hdul:
-                data = hdul[0].data
-                if data is not None and data.ndim >= 2:
-                    dynamic_threshold = threshold
-                    data_max = np.max(data)
-                    if np.issubdtype(data.dtype, np.floating) or data_max <= 10.0:
-                        dynamic_threshold = 0.0001
-
-                    is_black, median_val = self.is_black_frame(
-                        data, dynamic_threshold, crop_fraction
-                    )
-                    return (idx, filename, median_val, is_black)
-                else:
-                    self.siril.log(
-                        f"{filename}: Unexpected data shape {data.shape if data is not None else 'None'}",
-                        LogColor.SALMON,
-                    )
-        except Exception as e:
-            self.siril.log(f"Error reading {filename}: {e}", LogColor.RED)
-            return None
-
     def is_black_frame(self, data, threshold=10, crop_fraction=0.4):
         if data.ndim > 2:
             data = data[0]
@@ -718,42 +737,52 @@ class PreprocessingInterface(QMainWindow):
     def scan_black_frames(
         self, folder="process", threshold=30, crop_fraction=0.4, seq_name=None
     ):
-
         black_frames = []
         black_indices = []
         all_frames_info = []
-        lock = threading.Lock()
-
         self.siril.log("Starting scan for black frames...", LogColor.BLUE)
         self.siril.log(
             "Note: This process is running in the background and may take a while depending on your system and drizzle factor.",
             LogColor.BLUE,
         )
 
-        # Use ThreadPoolExecutor for multi-threaded processing
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {
-                executor.submit(
-                    self.process_frame,
-                    idx,
-                    filename,
-                    seq_name,
-                    folder,
-                    threshold,
-                    crop_fraction,
-                ): idx
-                for idx, filename in enumerate(sorted(os.listdir(folder)))
-            }
+        for idx, filename in enumerate(sorted(os.listdir(folder))):
+            if filename.startswith(seq_name) and filename.lower().endswith(
+                self.fits_extension
+            ):
+                filepath = os.path.join(folder, filename)
+                try:
+                    with fits.open(filepath) as hdul:
+                        data = hdul[0].data
+                        if data is not None and data.ndim >= 2:
+                            dynamic_threshold = threshold
+                            data_max = np.max(data)
+                            if (
+                                np.issubdtype(data.dtype, np.floating)
+                                or data_max <= 10.0
+                            ):
+                                dynamic_threshold = 0.0001
 
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    idx, filename, median_val, is_black = result
-                    with lock:
-                        all_frames_info.append((filename, median_val))
-                        if is_black:
-                            black_frames.append(filename)
-                            black_indices.append(len(all_frames_info))
+                            is_black, median_val = self.is_black_frame(
+                                data, dynamic_threshold, crop_fraction
+                            )
+                            all_frames_info.append((filename, median_val))
+
+                            # Log for debugging
+                            # print(
+                            #     f"{filename} | shape: {data.shape} | dtype: {data.dtype} | min: {np.min(data)} | max: {data_max} | median: {median_val} | threshold used: {dynamic_threshold}"
+                            # )
+
+                            if is_black:
+                                black_frames.append(filename)
+                                black_indices.append(len(all_frames_info))
+                        else:
+                            self.siril.log(
+                                f"{filename}: Unexpected data shape {data.shape if data is not None else 'None'}",
+                                LogColor.SALMON,
+                            )
+                except Exception as e:
+                    self.siril.log(f"Error reading {filename}: {e}", LogColor.RED)
 
         self.siril.log(f"Following files are black: {black_frames}", LogColor.SALMON)
         self.siril.log(
@@ -880,6 +909,8 @@ class PreprocessingInterface(QMainWindow):
             )
         ):
             cmd_args.append("-dark=darks_stacked")
+            # Cosmetic Correction with sigma clipping 3 low and 3 high
+            cmd_args.append("-cc=dark 3 3")
         if os.path.exists(
             os.path.join(
                 self.current_working_directory,
@@ -887,6 +918,15 @@ class PreprocessingInterface(QMainWindow):
             )
         ):
             cmd_args.append("-flat=flats_stacked")
+
+        # apply bias to lights because it does magic
+        if os.path.exists(
+            os.path.join(
+                self.current_working_directory,
+                f"process/biases_stacked{self.fits_extension}",
+            )
+        ):
+            cmd_args.append("-bias=biases_stacked")
         cmd_args.extend(["-cfa", "-equalize_cfa"])
         # cmd_args = [
         #     "calibrate",
@@ -910,6 +950,9 @@ class PreprocessingInterface(QMainWindow):
         rejection=False,
         output_name=None,
         overlap_norm=False,
+        output_norm=True,
+        stack_weighted=False,
+        weighting_method="Weighted FWHM",
     ):
         """Stack it all, and feather if it's provided"""
         out = "result" if output_name is None else output_name
@@ -919,14 +962,22 @@ class PreprocessingInterface(QMainWindow):
             f"{seq_name}",
             " rej 3 3" if rejection else " rej none",
             "-norm=addscale",
-            "-output_norm",
+            "-output_norm" if output_norm else "",
             "-overlap_norm" if overlap_norm else "",
             "-rgb_equal",
             "-maximize",
             "-filter-included",
-            "-weight=wfwhm",
+            "-32b",
             f"-out={out}",
         ]
+        if stack_weighted:
+            weighting_map = {
+                "Number of Stars": "nbstars",
+                "Weighted FWHM": "wfwhm",
+                "Noise": "noise",
+            }
+            weight_option = weighting_map.get(weighting_method, "wfwhm")
+            cmd_args.append(f"-weight={weight_option}")
         if feather:
             cmd_args.append(f"-feather={feather_amount}")
 
@@ -968,7 +1019,7 @@ class PreprocessingInterface(QMainWindow):
 
         file_name = f"{object_name}_{stack_count:03d}x{exptime}sec_{livetime}s_"  # {date_obs_str}"
         if self.drizzle_status:
-            file_name += f"_drizzle-{drizzle_str}x_"
+            file_name += f"drizzle-{drizzle_str}x_"
 
         file_name += f"{current_datetime}{suffix}"
         # Add filter information if available
@@ -1026,39 +1077,171 @@ class PreprocessingInterface(QMainWindow):
                 file_path = os.path.join(process_dir, f)
                 if os.path.isfile(file_path):
                     # print(f"Removing: {file_path}")
-                    os.remove(file_path)
+                    # Retry loop for safe deletion
+                    for i in range(3):
+                        try:
+                            os.remove(file_path)
+                            break
+                        except OSError:
+                            time.sleep(0.5)
+                    else:
+                        # If loop completes without break, deletion failed
+                        self.siril.log(f"Failed to delete {file_path}", LogColor.SALMON)
         self.siril.log(f"Cleaned up {prefix}", LogColor.BLUE)
 
     def show_help(self):
-        help_text = (
-            f"Author: {AUTHOR} ({WEBSITE})\n"
-            f"Youtube: {YOUTUBE}\n"
-            "Discord: https://discord.gg/yXKqrawpjr\n"
-            "Patreon: https://www.patreon.com/c/naztronomy\n"
-            "Buy me a Coffee: https://www.buymeacoffee.com/naztronomy\n\n"
-            "Info:\n"
-            "1. Recommend using blank working directory for clean setup.\n"
-            "2. Calibration Frames are Optional.\n"
-            "3. Presets can be saved and loaded automatically from the presets dir.\n"
-            "4. Multiple sessions allowed. 2048 total lights limit on Windows.\n"
-            "5. Preprocessed lights saved in collected_lights directory.\n"
-            "6. Drizzle increases processing time significantly.\n"
-            "7. Master frames saved to 'masters' with descriptive names.\n"
-            "8. 'Process separately' creates individual session stacks.\n"
-            "9. 'Mono' mode for monochrome cameras and are saved individually, frames are not combined.\n"
-            "10. Filter settings exclude poor quality frames.\n"
-            "11. Single calibration files treated as masters.\n"
-            "12. Include logs when asking for help."
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{APP_NAME} — Help")
+        dialog.setMinimumSize(620, 580)
+        dialog.resize(660, 640)
+
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+
+        # Header
+        header_label = QLabel(f"<b>{APP_NAME}</b>")
+        header_font = QFont()
+        header_font.setPointSize(11)
+        header_label.setFont(header_font)
+        outer.addWidget(header_label)
+
+        author_label = QLabel(f'<a href="{WEBSITE}">{AUTHOR} (Naztronomy)</a>')
+        author_label.setOpenExternalLinks(True)
+        outer.addWidget(author_label)
+
+        # Scrollable help text
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setReadOnly(True)
+        browser.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        QMessageBox.information(self, "Help", help_text)
-        self.siril.log(help_text, LogColor.BLUE)
+        browser.setHtml(
+            """
+            <style>
+            body  { font-family: sans-serif; font-size: 13px; margin: 4px; }
+            h3    { margin-bottom: 4px; margin-top: 14px; color: #2c7bb6; }
+            h3:first-child { margin-top: 0; }
+            ul    { margin-top: 2px; padding-left: 18px; }
+            li    { margin-bottom: 3px; }
+            .note { color: #888; font-style: italic; }
+            </style>
+
+            <h3>General</h3>
+            <ul>
+            <li>Use a <b>blank working directory</b> for the cleanest setup.</li>
+            <li>Calibration frames (darks, flats, biases) are <b>optional</b>.</li>
+            <li>Single calibration files are treated as <b>masters</b> automatically.</li>
+            <li>Master frames are saved to a <b>masters/</b> directory with descriptive names.</li>
+            <li>Filter settings can be used to <b>exclude poor quality frames</b> before stacking.</li>
+            <li>Maximum of <b>2048 total light frames</b> across all sessions on Windows. Experimental UCRT64 version increases the limit to 8192 files.</li>
+            <li>Always <b>include logs</b> when asking for help. Click the download arrow at the bottom of the console to export your logs.</li>
+            </ul>
+
+            <h3>Sessions</h3>
+            <ul>
+            <li>Add multiple sessions to process <b>data from different nights or targets</b>.</li>
+            <li>Each session has its own lights, darks, flats, and biases.</li>
+            <li>Calibration cannot be shared between sessions (yet).</li>
+            <li>Preprocessed lights are saved to a <b>collected_lights/</b> directory when
+                <i>Save Calibrated Lights</i> is enabled.</li>
+            </ul>
+
+            <h3>Presets</h3>
+            <ul>
+            <li>Presets auto-save/load from the <b>presets/</b> directory in your working folder.</li>
+            <li>Use <b>Save As…</b> / <b>Load From…</b> (dropdown arrow on the buttons) to choose
+                a custom file location.</li>
+            </ul>
+
+            <h3>Drizzle</h3>
+            <ul>
+            <li>Drizzle can improve resolution but <b>increases processing time</b> and file size significantly. It may also product black frames which are then automatically purged by this script.</li>
+            <li>Recommended to use drizzle 1x.</li>
+            <li>Lower pixel-fraction values reduce artifacts but may increase noise.</li>
+            </ul>
+
+            <h3>Target Modes</h3>
+            <ul>
+            <li><b>Single Target</b>: All sessions are combined into one final stacked image.
+                Best for imaging the same object across multiple nights.</li>
+            <li><b>Multi Target (Do Not Combine)</b>: Each session is processed and stacked
+                <i>separately</i>. Use when sessions contain different objects or filters that
+                should not be merged.</li>
+            <li><b>Create Paneled Mosaic</b>: Sessions are registered and stacked together
+                with overlap-normalisation to produce a seamless mosaic. Each session should
+                cover a different panel of the same field.</li>
+            <li><b>Mono (Experimental)</b>: For monochrome cameras. Frames are calibrated and
+                stacked individually per session and are <b>not combined</b>. Debayering is
+                skipped. A final mono_stacks folder is created where the stacked and registered mono sessions are saved.</li>
+            </ul>
+
+            <h3>Create Final Stack</h3>
+            <ul>
+            <li>When <i>Single Target</i> is selected and <i>Save Calibrated Lights</i> is
+                <b>off</b>, each session is stacked individually first, then the per-session
+                stacks are combined into a final result.</li>
+            <li>When <i>Save Calibrated Lights</i> is <b>on</b>, all calibrated lights are
+                collected and stacked together in one pass.</li>
+            </ul>
+            """
+        )
+        outer.addWidget(browser)
+
+        # Social / community buttons
+        links_label = QLabel("<b>Community &amp; Support</b>")
+        outer.addWidget(links_label)
+
+        links_row = QHBoxLayout()
+        links_row.setSpacing(8)
+
+        social_buttons = [
+            (
+                "YouTube",
+                "#FF0000",
+                f"{YOUTUBE}",
+            ),
+            ("Discord", "#5865F2", f"{DISCORD}"),
+            ("Patreon", "#FF424D", f"{PATREON}"),
+            ("Buy Me a Coffee", "#FFDD00", f"{BUY_ME_A_COFFEE}"),
+            # ("Website", "#2c7bb6", f"{WEBSITE}"),
+        ]
+
+        for label, color, url in social_buttons:
+            btn = QPushButton(label)
+            text_color = "#000" if color == "#FFDD00" else "#fff"
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {color}; color: {text_color};"
+                f" border: none; border-radius: 4px; padding: 6px 10px; font-weight: bold; }}"
+                f" QPushButton:hover {{ opacity: 0.85; border: 1px solid rgba(0,0,0,0.3); }}"
+            )
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(url)
+            btn.clicked.connect(
+                lambda checked, u=url: QDesktopServices.openUrl(QUrl(u))
+            )
+            links_row.addWidget(btn)
+
+        outer.addLayout(links_row)
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(90)
+        close_btn.clicked.connect(dialog.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
+
+        dialog.exec()
 
     def create_widgets(self):
         """Creates the UI widgets using PyQt6."""
 
         # Main layout
         main_widget = QWidget()
-        self.setMinimumSize(750, 600)
+        self.setMinimumSize(750, 700)
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(15, 10, 15, 15)
@@ -1144,11 +1327,26 @@ class PreprocessingInterface(QMainWindow):
 
         # Processing tab
         processing_tab = QWidget()
-        processing_layout = QVBoxLayout(processing_tab)
+        processing_tab_outer = QVBoxLayout(processing_tab)
+        processing_tab_outer.setContentsMargins(0, 0, 0, 0)
+        processing_tab_outer.setSpacing(6)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        scroll_content = QWidget()
+        processing_layout = QVBoxLayout(scroll_content)
 
         # Drizzle settings
         drizzle_group = QGroupBox("Optional Preprocessing Steps")
         drizzle_layout = QVBoxLayout()
+
+        cleanup_tooltip = "Enable this option to delete all intermediary files after they are done processing. This saves space on your hard drive.\nNote: If your session is batched, this option is automatically enabled even if it's unchecked!"
+        self.cleanup_check = QCheckBox("Clean up intermediate files")
+        self.cleanup_check.setToolTip(cleanup_tooltip)
+        drizzle_layout.addWidget(self.cleanup_check)
 
         bg_extract_tooltip = "Removes background gradients from your images before stacking. Uses Polynomial value 1 and 10 samples."
 
@@ -1206,11 +1404,11 @@ class PreprocessingInterface(QMainWindow):
         reg_group = QGroupBox("Optional Filter Settings")
         reg_layout = QVBoxLayout()
 
-        # Registration controls
+        # Roundness filter
         roundness_label_tooltip = "Filters images by star roundness, calculated using the second moments of detected stars. \nA lower roundness value applies a stricter filter, keeping only frames with well-defined, circular stars. Higher roundness values allow more variation in star shapes."
         roundness_layout = QHBoxLayout()
-        roundness_label = QLabel("Filter Roundness:")
-        roundness_label.setToolTip(roundness_label_tooltip)
+        self.roundness_check = QCheckBox("Filter Roundness:")
+        self.roundness_check.setToolTip(roundness_label_tooltip)
         self.roundness_spinbox = QDoubleSpinBox()
         self.roundness_spinbox.setRange(1, 4)
         self.roundness_spinbox.setSingleStep(0.1)
@@ -1218,43 +1416,126 @@ class PreprocessingInterface(QMainWindow):
         self.roundness_spinbox.setDecimals(1)
         self.roundness_spinbox.setMinimumWidth(80)
         self.roundness_spinbox.setSuffix(" σ")
+        self.roundness_spinbox.setEnabled(False)
         self.roundness_spinbox.setToolTip(roundness_label_tooltip)
-        roundness_layout.addWidget(roundness_label)
+        self.roundness_mode_combo = QComboBox()
+        self.roundness_mode_combo.addItems(["σ", "%"])
+        self.roundness_mode_combo.setFixedWidth(65)
+        self.roundness_mode_combo.setEnabled(False)
+        self.roundness_check.toggled.connect(self.roundness_spinbox.setEnabled)
+        self.roundness_check.toggled.connect(self.roundness_mode_combo.setEnabled)
+        self.roundness_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.roundness_mode_combo, self.roundness_spinbox
+            )
+        )
+        roundness_layout.addWidget(self.roundness_check)
         roundness_layout.addWidget(self.roundness_spinbox)
+        roundness_layout.addWidget(self.roundness_mode_combo)
         reg_layout.addLayout(roundness_layout)
-
-        reg_group.setLayout(reg_layout)
-        processing_layout.addWidget(reg_group)
 
         # FWHM filter
         fwhm_label_tooltip = "Filters images by weighted Full Width at Half Maximum (FWHM), calculated using star sharpness. \nA lower sigma value applies a stricter filter, keeping only frames close to the median FWHM. Higher sigma allows more variation."
         fwhm_layout = QHBoxLayout()
-        fwhm_label = QLabel("Filter FWHM:")
+        self.fwhm_check = QCheckBox("Filter FWHM:")
+        self.fwhm_check.setToolTip(fwhm_label_tooltip)
         self.fwhm_spinbox = QDoubleSpinBox()
-        fwhm_label.setToolTip(fwhm_label_tooltip)
         self.fwhm_spinbox.setRange(1, 4)
         self.fwhm_spinbox.setSingleStep(0.1)
         self.fwhm_spinbox.setValue(UI_DEFAULTS["filter_wfwhm"])
         self.fwhm_spinbox.setDecimals(1)
         self.fwhm_spinbox.setMinimumWidth(80)
         self.fwhm_spinbox.setSuffix(" σ")
+        self.fwhm_spinbox.setEnabled(False)
         self.fwhm_spinbox.setToolTip(fwhm_label_tooltip)
-        fwhm_layout.addWidget(fwhm_label)
+        self.fwhm_mode_combo = QComboBox()
+        self.fwhm_mode_combo.addItems(["σ", "%"])
+        self.fwhm_mode_combo.setFixedWidth(65)
+        self.fwhm_mode_combo.setEnabled(False)
+        self.fwhm_check.toggled.connect(self.fwhm_spinbox.setEnabled)
+        self.fwhm_check.toggled.connect(self.fwhm_mode_combo.setEnabled)
+        self.fwhm_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.fwhm_mode_combo, self.fwhm_spinbox
+            )
+        )
+        fwhm_layout.addWidget(self.fwhm_check)
         fwhm_layout.addWidget(self.fwhm_spinbox)
+        fwhm_layout.addWidget(self.fwhm_mode_combo)
         reg_layout.addLayout(fwhm_layout)
+
+        # Star count filter
+        stars_label_tooltip = "Filters images by star count. Frames with significantly fewer stars than the median are excluded. \nA lower sigma value applies a stricter filter. Higher sigma allows more variation."
+        stars_layout = QHBoxLayout()
+        self.stars_check = QCheckBox("Filter Star Count:")
+        self.stars_check.setToolTip(stars_label_tooltip)
+        self.stars_spinbox = QDoubleSpinBox()
+        self.stars_spinbox.setRange(1, 4)
+        self.stars_spinbox.setSingleStep(0.1)
+        self.stars_spinbox.setValue(UI_DEFAULTS["filter_stars"])
+        self.stars_spinbox.setDecimals(1)
+        self.stars_spinbox.setMinimumWidth(80)
+        self.stars_spinbox.setSuffix(" σ")
+        self.stars_spinbox.setEnabled(False)
+        self.stars_spinbox.setToolTip(stars_label_tooltip)
+        self.stars_mode_combo = QComboBox()
+        self.stars_mode_combo.addItems(["σ", "%"])
+        self.stars_mode_combo.setFixedWidth(65)
+        self.stars_mode_combo.setEnabled(False)
+        self.stars_check.toggled.connect(self.stars_spinbox.setEnabled)
+        self.stars_check.toggled.connect(self.stars_mode_combo.setEnabled)
+        self.stars_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.stars_mode_combo, self.stars_spinbox
+            )
+        )
+        stars_layout.addWidget(self.stars_check)
+        stars_layout.addWidget(self.stars_spinbox)
+        stars_layout.addWidget(self.stars_mode_combo)
+        reg_layout.addLayout(stars_layout)
+
+        # Background filter
+        bkg_label_tooltip = "Filters images by background level. Frames with a significantly higher background than the median are excluded. \nA lower sigma value applies a stricter filter. Higher sigma allows more variation."
+        bkg_layout = QHBoxLayout()
+        self.bkg_check = QCheckBox("Filter Background:")
+        self.bkg_check.setToolTip(bkg_label_tooltip)
+        self.bkg_spinbox = QDoubleSpinBox()
+        self.bkg_spinbox.setRange(1, 4)
+        self.bkg_spinbox.setSingleStep(0.1)
+        self.bkg_spinbox.setValue(UI_DEFAULTS["filter_bkg"])
+        self.bkg_spinbox.setDecimals(1)
+        self.bkg_spinbox.setMinimumWidth(80)
+        self.bkg_spinbox.setSuffix(" σ")
+        self.bkg_spinbox.setEnabled(False)
+        self.bkg_spinbox.setToolTip(bkg_label_tooltip)
+        self.bkg_mode_combo = QComboBox()
+        self.bkg_mode_combo.addItems(["σ", "%"])
+        self.bkg_mode_combo.setFixedWidth(65)
+        self.bkg_mode_combo.setEnabled(False)
+        self.bkg_check.toggled.connect(self.bkg_spinbox.setEnabled)
+        self.bkg_check.toggled.connect(self.bkg_mode_combo.setEnabled)
+        self.bkg_mode_combo.currentTextChanged.connect(
+            lambda _: self._on_filter_mode_changed(
+                self.bkg_mode_combo, self.bkg_spinbox
+            )
+        )
+        bkg_layout.addWidget(self.bkg_check)
+        bkg_layout.addWidget(self.bkg_spinbox)
+        bkg_layout.addWidget(self.bkg_mode_combo)
+        reg_layout.addLayout(bkg_layout)
+
+        reg_group.setLayout(reg_layout)
+        processing_layout.addWidget(reg_group)
 
         # Stacking settings
         stack_group = QGroupBox("Stacking Settings")
         stack_layout = QVBoxLayout()
 
-        self.feather_checkbox = QCheckBox("Enable Feather")
-        stack_layout.addWidget(self.feather_checkbox)
-
         feather_tooltip = "Blends the edges of stacked frames to reduce edge artifacts in the final image."
-        feather_amount_label_tooltip = "Size of the feathering blend in pixels. Larger values create smoother transitions but may affect more of the image edge."
-        feather_amount_layout = QHBoxLayout()
-        feather_amount_label = QLabel("Feather Amount:")
-        feather_amount_label.setToolTip(feather_tooltip)
+        feather_amount_tooltip = "Size of the feathering blend in pixels. Larger values create smoother transitions but may affect more of the image edge."
+        feather_layout = QHBoxLayout()
+        self.feather_checkbox = QCheckBox("Enable Feather:")
+        self.feather_checkbox.setToolTip(feather_tooltip)
         self.feather_amount_spinbox = QSpinBox()
         self.feather_amount_spinbox.setRange(5, 2000)
         self.feather_amount_spinbox.setSingleStep(5)
@@ -1262,60 +1543,134 @@ class PreprocessingInterface(QMainWindow):
         self.feather_amount_spinbox.setMinimumWidth(80)
         self.feather_amount_spinbox.setSuffix(" px")
         self.feather_amount_spinbox.setEnabled(False)
-        self.feather_amount_spinbox.setToolTip(feather_amount_label_tooltip)
-        feather_amount_layout.addWidget(feather_amount_label)
-        feather_amount_layout.addWidget(self.feather_amount_spinbox)
-        stack_layout.addLayout(feather_amount_layout)
-
-        cleanup_tooltip = "Enable this option to delete all intermediary files after they are done processing. This saves space on your hard drive.\nNote: If your session is batched, this option is automatically enabled even if it's unchecked!"
-
-        self.cleanup_check = QCheckBox("Clean up intermediate files")
-        self.cleanup_check.setToolTip(cleanup_tooltip)
-        stack_layout.addWidget(self.cleanup_check)
+        self.feather_amount_spinbox.setToolTip(feather_amount_tooltip)
+        feather_layout.addWidget(self.feather_checkbox)
+        feather_layout.addWidget(self.feather_amount_spinbox)
+        stack_layout.addLayout(feather_layout)
 
         self.feather_checkbox.toggled.connect(self.feather_amount_spinbox.setEnabled)
-        process_separately_tooltip = "Process each session as a separate stack in addition to the merged stack. Individual stacks will be saved in a 'individual_stacks' directory."
 
-        self.process_separately_check = QCheckBox("Process sessions separately")
-        self.process_separately_check.setToolTip(process_separately_tooltip)
-        self.process_separately_check.setEnabled(len(self.sessions) > 1)
-        stack_layout.addWidget(self.process_separately_check)
+        weight_tooltip = "Weight frames during stacking to bias the result toward higher-quality frames."
+        weight_method_tooltip = "Weighting method: Number of Stars (more stars = more weight), Weighted FWHM (sharper = more weight), Noise (less noise = more weight)."
+        weight_layout = QHBoxLayout()
+        self.weight_stack_check = QCheckBox("Weight stacking:")
+        self.weight_stack_check.setToolTip(weight_tooltip)
+        self.weight_method_combo = QComboBox()
+        self.weight_method_combo.addItems(["Number of Stars", "Weighted FWHM", "Noise"])
+        self.weight_method_combo.setCurrentText("Weighted FWHM")
+        self.weight_method_combo.setEnabled(False)
+        self.weight_method_combo.setToolTip(weight_method_tooltip)
+        self.weight_stack_check.toggled.connect(self.weight_method_combo.setEnabled)
+        weight_layout.addWidget(self.weight_stack_check)
+        weight_layout.addWidget(self.weight_method_combo)
+        stack_layout.addLayout(weight_layout)
 
-        create_final_stack_tooltip = (
-            "Create a final stack by combining all preprocessed lights."
+        save_calibrated_lights_tooltip = "Save calibrated light frames after processing. Allows you to collect everything even if you don't create stacks immediately."
+        self.save_calibrated_lights_check = QCheckBox("Save calibrated lights")
+        self.save_calibrated_lights_check.setToolTip(save_calibrated_lights_tooltip)
+        stack_layout.addWidget(self.save_calibrated_lights_check)
+
+        output_norm_tooltip = "Normalize the output stack so pixel values are scaled relatively. Recommended for most use cases. Turn it OFF for photometry or if you see strange artifacts in where your background is clipping to zero."
+        self.output_norm_check = QCheckBox("Output normalization")
+        self.output_norm_check.setToolTip(output_norm_tooltip)
+        self.output_norm_check.setChecked(True)
+        stack_layout.addWidget(self.output_norm_check)
+
+        # Target mode radio buttons
+        target_mode_box = QGroupBox("Target Mode")
+        target_mode_layout = QVBoxLayout()
+
+        self.single_target_radio = QRadioButton("Single target")
+        self.single_target_radio.setToolTip(
+            "All sessions are of the same target and will be combined into a single final stack."
         )
+        self.single_target_radio.setChecked(True)
+
+        self.multi_target_radio = QRadioButton(
+            "Multi target (Do not combine into final stack)"
+        )
+        self.multi_target_radio.setToolTip(
+            "Each session is a different target. Sessions are stacked individually — no combined stack is produced."
+        )
+        self.multi_target_radio.setEnabled(len(self.sessions) > 1)
+
+        self.paneled_mosaic_radio = QRadioButton("Paneled mosaic")
+        self.paneled_mosaic_radio.setToolTip(
+            "Sessions are mosaic panels of the same target. Each session is stacked individually, then stitched into a mosaic. No drizzle or filters applied during stitching. Applies Overlap Normalization so your panels MUST have overlaps."
+        )
+        self.paneled_mosaic_radio.setEnabled(len(self.sessions) > 1)
+
+        self.mono_radio = QRadioButton("Mono (Experimental)")
+        self.mono_radio.setToolTip(
+            "Experimental: Process images as monochrome (no debayering). Use only for monochrome cameras or special processing needs. Sessions are processed individually — no combined stack is produced."
+        )
+        # Alias so all existing self.mono_check.isChecked() references keep working
+        self.mono_check = self.mono_radio
+
+        self.target_mode_button_group = QButtonGroup()
+        self.target_mode_button_group.addButton(self.single_target_radio)
+        self.target_mode_button_group.addButton(self.multi_target_radio)
+        self.target_mode_button_group.addButton(self.paneled_mosaic_radio)
+        self.target_mode_button_group.addButton(self.mono_radio)
+
+        target_mode_layout.addWidget(self.single_target_radio)
+        target_mode_layout.addWidget(self.multi_target_radio)
+        target_mode_layout.addWidget(self.paneled_mosaic_radio)
+        target_mode_layout.addWidget(self.mono_radio)
+        target_mode_box.setLayout(target_mode_layout)
+        stack_layout.addWidget(target_mode_box)
+
+        self.target_mode_button_group.buttonToggled.connect(self.on_target_mode_changed)
+
+        create_final_stack_tooltip = "Create a final stack by combining all preprocessed lights. Automatically enabled and locked for paneled mosaic."
 
         self.create_final_stack_check = QCheckBox("Create final stack")
         self.create_final_stack_check.setToolTip(create_final_stack_tooltip)
         self.create_final_stack_check.setChecked(True)
         stack_layout.addWidget(self.create_final_stack_check)
 
-        mono_checkbox_tooltip = "Experimental: Process images as monochrome (no debayering). Use only for monochrome cameras or special processing needs."
-
-        self.mono_check = QCheckBox("Mono (Experimental)")
-        self.mono_check.setToolTip(mono_checkbox_tooltip)
-        stack_layout.addWidget(self.mono_check)
-
         stack_group.setLayout(stack_layout)
         processing_layout.addWidget(stack_group)
 
-        # Process button
-        process_btn = QPushButton("Process Files")
+        scroll_area.setWidget(scroll_content)
+        processing_tab_outer.addWidget(scroll_area)
+
+        # Process button (always visible, outside scroll area)
+        process_btn = QPushButton("Start Preprocessing")
+        process_btn.setMinimumHeight(38)
+        process_btn.setStyleSheet(
+            "QPushButton { background-color: #2563eb; color: #ffffff;"
+            " border: none; border-radius: 4px; font-weight: bold; font-size: 13px; }"
+            " QPushButton:hover { background-color: #1d4ed8; }"
+            " QPushButton:pressed { background-color: #1e40af; }"
+        )
         process_btn.clicked.connect(
             lambda: self.run_script(
                 bg_extract=self.bg_extract_check.isChecked(),
                 drizzle=self.drizzle_checkbox.isChecked(),
-                drizzle_amount=self.drizzle_amount_spinbox.value(),
-                pixel_fraction=self.pixel_fraction_spinbox.value(),
+                drizzle_amount=round(self.drizzle_amount_spinbox.value(), 1),
+                pixel_fraction=round(self.pixel_fraction_spinbox.value(), 2),
                 feather=self.feather_checkbox.isChecked(),
-                feather_amount=self.feather_amount_spinbox.value(),
-                filter_round=self.roundness_spinbox.value(),
-                filter_wfwhm=self.fwhm_spinbox.value(),
+                feather_amount=round(self.feather_amount_spinbox.value(), 0),
+                filter_round=round(self.roundness_spinbox.value(), 1),
+                filter_wfwhm=round(self.fwhm_spinbox.value(), 1),
+                filter_stars=round(self.stars_spinbox.value(), 1),
+                filter_bkg=round(self.bkg_spinbox.value(), 1),
+                use_filter_round=self.roundness_check.isChecked(),
+                use_filter_wfwhm=self.fwhm_check.isChecked(),
+                use_filter_stars=self.stars_check.isChecked(),
+                use_filter_bkg=self.bkg_check.isChecked(),
                 clean_up_files=self.cleanup_check.isChecked(),
-                process_separately=self.process_separately_check.isChecked(),
+                process_separately=self.multi_target_radio.isChecked()
+                or self.paneled_mosaic_radio.isChecked(),
+                save_calibrated_lights=self.save_calibrated_lights_check.isChecked(),
+                paneled_mosaic=self.paneled_mosaic_radio.isChecked(),
+                stack_weighted=self.weight_stack_check.isChecked(),
+                weighting_method=self.weight_method_combo.currentText(),
+                output_norm=self.output_norm_check.isChecked(),
             )
         )
-        processing_layout.addWidget(process_btn)
+        processing_tab_outer.addWidget(process_btn)
 
         # Add tabs
         tab_widget.addTab(files_tab, "1. Files")
@@ -1335,16 +1690,34 @@ class PreprocessingInterface(QMainWindow):
         help_button.clicked.connect(self.show_help)
         button_layout.addWidget(help_button)
 
-        save_presets_button = QPushButton("Save Presets")
-        save_presets_button.setMinimumWidth(80)
+        save_presets_button = QToolButton()
+        save_presets_button.setText("Save Presets")
+        save_presets_button.setMinimumWidth(100)
         save_presets_button.setMinimumHeight(35)
+        save_presets_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
         save_presets_button.clicked.connect(self.save_presets)
+        save_menu = QMenu(save_presets_button)
+        save_as_action = QAction("Save As...", self)
+        save_as_action.triggered.connect(self.save_presets_as)
+        save_menu.addAction(save_as_action)
+        save_presets_button.setMenu(save_menu)
         button_layout.addWidget(save_presets_button)
 
-        load_presets_button = QPushButton("Load Presets")
-        load_presets_button.setMinimumWidth(80)
+        load_presets_button = QToolButton()
+        load_presets_button.setText("Load Presets")
+        load_presets_button.setMinimumWidth(100)
         load_presets_button.setMinimumHeight(35)
+        load_presets_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
         load_presets_button.clicked.connect(self.load_presets)
+        load_menu = QMenu(load_presets_button)
+        load_from_action = QAction("Load From...", self)
+        load_from_action.triggered.connect(self.load_presets_from)
+        load_menu.addAction(load_from_action)
+        load_presets_button.setMenu(load_menu)
         button_layout.addWidget(load_presets_button)
 
         button_layout.addStretch()  # Add space between buttons
@@ -1353,7 +1726,7 @@ class PreprocessingInterface(QMainWindow):
         close_button.setMinimumWidth(100)
         close_button.setMinimumHeight(35)
         close_button.clicked.connect(self.close_dialog)
-        button_layout.addWidget(close_button)
+        # button_layout.addWidget(close_button)
 
         # button_layout.addWidget(help_button)
         button_layout.addStretch()
@@ -1373,8 +1746,8 @@ class PreprocessingInterface(QMainWindow):
             LogColor.GREEN,
         )
         self.siril.log(
-            """
-        Thank you for using the Naztronomy Smart Telescope Preprocessor! 
+            f"""
+        Thank you for using the {APP_NAME}!! 
         The author of this script is Nazmus Nasir (Naztronomy).
         Website: https://www.Naztronomy.com 
         YouTube: https://www.YouTube.com/Naztronomy 
@@ -1386,13 +1759,45 @@ class PreprocessingInterface(QMainWindow):
         )
 
     def update_process_separately_checkbox(self):
-        """Update the enabled state of process_separately_check based on session count."""
-        self.process_separately_check.setEnabled(len(self.sessions) > 1)
-        if len(self.sessions) == 1:
-            self.process_separately_check.setChecked(False)
+        """Update the enabled state of target mode radios based on session count."""
+        multi_session = len(self.sessions) > 1
+        self.multi_target_radio.setEnabled(multi_session)
+        self.paneled_mosaic_radio.setEnabled(multi_session)
+        if not multi_session:
+            self.single_target_radio.setChecked(True)
 
-    def save_presets(self):
-        """Save current UI settings and session data to a preset file"""
+    def on_target_mode_changed(self, button, checked):
+        """Update create_final_stack state when target mode radio selection changes."""
+        if not checked:
+            return
+        if self.paneled_mosaic_radio.isChecked():
+            self.create_final_stack_check.setChecked(True)
+            self.create_final_stack_check.setEnabled(False)
+        elif self.multi_target_radio.isChecked() or self.mono_radio.isChecked():
+            self.create_final_stack_check.setChecked(False)
+            self.create_final_stack_check.setEnabled(False)
+        else:  # single target
+            self.create_final_stack_check.setChecked(True)
+            self.create_final_stack_check.setEnabled(True)
+
+    def _on_filter_mode_changed(self, combo, spinbox):
+        """Update spinbox properties when filter mode changes between σ and %."""
+        if combo.currentText() == "σ":
+            spinbox.setRange(1, 4)
+            spinbox.setSingleStep(0.1)
+            spinbox.setDecimals(1)
+            spinbox.setValue(3.0)
+            spinbox.setSuffix(" σ")
+        else:
+            spinbox.setRange(1, 100)
+            spinbox.setSingleStep(1)
+            spinbox.setDecimals(0)
+            spinbox.setValue(100)
+            spinbox.setSuffix(" %")
+
+    def save_presets(self, filepath=None):
+        """Save current UI settings and session data to a preset file.
+        If filepath is None, saves to the default location."""
         # Collect settings
         presets = {
             "bg_extract": self.bg_extract_check.isChecked(),
@@ -1400,13 +1805,34 @@ class PreprocessingInterface(QMainWindow):
             "drizzle_amount": round(self.drizzle_amount_spinbox.value(), 1),
             "pixel_fraction": round(self.pixel_fraction_spinbox.value(), 2),
             "feather": self.feather_checkbox.isChecked(),
-            "feather_amount": round(self.feather_amount_spinbox.value(), 2),
+            "feather_amount": round(self.feather_amount_spinbox.value(), 0),
             "filter_round": round(self.roundness_spinbox.value(), 1),
             "filter_wfwhm": round(self.fwhm_spinbox.value(), 1),
+            "filter_stars": round(self.stars_spinbox.value(), 1),
+            "filter_bkg": round(self.bkg_spinbox.value(), 1),
+            "use_filter_round": self.roundness_check.isChecked(),
+            "use_filter_wfwhm": self.fwhm_check.isChecked(),
+            "use_filter_stars": self.stars_check.isChecked(),
+            "use_filter_bkg": self.bkg_check.isChecked(),
+            "filter_round_mode": self.roundness_mode_combo.currentText(),
+            "filter_wfwhm_mode": self.fwhm_mode_combo.currentText(),
+            "filter_stars_mode": self.stars_mode_combo.currentText(),
+            "filter_bkg_mode": self.bkg_mode_combo.currentText(),
             "cleanup": self.cleanup_check.isChecked(),
-            "process_separately": self.process_separately_check.isChecked(),
+            "target_mode": (
+                "paneled"
+                if self.paneled_mosaic_radio.isChecked()
+                else (
+                    "multi"
+                    if self.multi_target_radio.isChecked()
+                    else "mono" if self.mono_radio.isChecked() else "single"
+                )
+            ),
             "create_final_stack": self.create_final_stack_check.isChecked(),
-            "mono": self.mono_check.isChecked(),
+            "save_calibrated_lights": self.save_calibrated_lights_check.isChecked(),
+            "output_norm": self.output_norm_check.isChecked(),
+            "stack_weighted": self.weight_stack_check.isChecked(),
+            "weighting_method": self.weight_method_combo.currentText(),
             # Add session information
             "sessions": [],
         }
@@ -1422,47 +1848,80 @@ class PreprocessingInterface(QMainWindow):
             }
             presets["sessions"].append(session_data)
 
-        # Create presets directory if it doesn't exist
-        presets_dir = os.path.join(self.current_working_directory, "presets")
-        os.makedirs(presets_dir, exist_ok=True)
-        presets_file = os.path.join(presets_dir, "naztronomy_osc_pp_presets.json")
+        if not filepath:
+            cwd = self.current_working_directory
+            if not cwd:
+                self.siril.log(
+                    "No working directory set - use 'Save As...' to choose a location.",
+                    LogColor.SALMON,
+                )
+                self.save_presets_as()
+                return
+            presets_dir = os.path.join(cwd, "presets")
+            os.makedirs(presets_dir, exist_ok=True)
+            filepath = os.path.join(presets_dir, "naztronomy_osc_pp_presets.json")
 
         try:
-            with open(presets_file, "w") as f:
+            with open(filepath, "w") as f:
                 json.dump(presets, f, indent=4)
             self.siril.log(
-                f"Saved presets and session data to {presets_file}", LogColor.GREEN
+                f"Saved presets and session data to {filepath}", LogColor.GREEN
             )
         except Exception as e:
             self.siril.log(f"Failed to save presets: {e}", LogColor.RED)
 
-    def load_presets(self):
-        """Load settings and session data from a preset file"""
+    def save_presets_as(self):
+        """Save presets to a user-chosen file location."""
+        cwd = self.current_working_directory or ""
+        presets_dir = os.path.join(cwd, "presets") if cwd else ""
+        if presets_dir:
+            os.makedirs(presets_dir, exist_ok=True)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Presets As",
+            presets_dir or cwd or "",
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if filepath:
+            self.save_presets(filepath=filepath)
+
+    def load_presets(self, filepath=None):
+        """Load settings and session data from a preset file.
+        If filepath is None, loads from the default location (or shows dialog if not found).
+        """
         try:
-            # Open file dialog to select presets file
-            # First check for default presets file
-            default_presets_file = os.path.join(
-                self.current_working_directory,
-                "presets",
-                "naztronomy_osc_pp_presets.json",
-            )
-
-            if os.path.exists(default_presets_file):
-                presets_file = default_presets_file
-            else:
-                # If default presets don't exist, show file dialog
-                presets_file, _ = QFileDialog.getOpenFileName(
-                    self,
-                    "Load Presets",
-                    os.path.join(self.current_working_directory, "presets"),
-                    "JSON Files (*.json);;All Files (*.*)",
+            if not filepath:
+                cwd = self.current_working_directory
+                default_presets_file = (
+                    os.path.join(cwd, "presets", "naztronomy_osc_pp_presets.json")
+                    if cwd
+                    else None
                 )
+                # Only use the default file if it exists and has content
+                if (
+                    default_presets_file
+                    and os.path.exists(default_presets_file)
+                    and os.path.getsize(default_presets_file) > 0
+                ):
+                    filepath = default_presets_file
+                else:
+                    if default_presets_file and os.path.exists(default_presets_file):
+                        self.siril.log(
+                            "Default presets file is empty — please choose a file.",
+                            LogColor.SALMON,
+                        )
+                    start_dir = os.path.join(cwd, "presets") if cwd else ""
+                    filepath, _ = QFileDialog.getOpenFileName(
+                        self,
+                        "Load Presets",
+                        start_dir,
+                        "JSON Files (*.json);;All Files (*.*)",
+                    )
+                    if not filepath:  # User canceled
+                        self.siril.log("Preset loading canceled", LogColor.BLUE)
+                        return
 
-                if not presets_file:  # User canceled
-                    self.siril.log("Preset loading canceled", LogColor.BLUE)
-                    return
-
-            with open(presets_file) as f:
+            with open(filepath) as f:
                 presets = json.load(f)
 
                 # Load UI settings
@@ -1472,16 +1931,54 @@ class PreprocessingInterface(QMainWindow):
                 self.pixel_fraction_spinbox.setValue(presets.get("pixel_fraction", 1.0))
                 self.feather_checkbox.setChecked(presets.get("feather", False))
                 self.feather_amount_spinbox.setValue(presets.get("feather_amount", 20))
+                self.roundness_mode_combo.setCurrentText(
+                    presets.get("filter_round_mode", "σ")
+                )
+                self.fwhm_mode_combo.setCurrentText(
+                    presets.get("filter_wfwhm_mode", "σ")
+                )
+                self.stars_mode_combo.setCurrentText(
+                    presets.get("filter_stars_mode", "σ")
+                )
+                self.bkg_mode_combo.setCurrentText(presets.get("filter_bkg_mode", "σ"))
                 self.roundness_spinbox.setValue(presets.get("filter_round", 3.0))
                 self.fwhm_spinbox.setValue(presets.get("filter_wfwhm", 3.0))
+                self.stars_spinbox.setValue(presets.get("filter_stars", 3.0))
+                self.bkg_spinbox.setValue(presets.get("filter_bkg", 3.0))
+                self.roundness_check.setChecked(presets.get("use_filter_round", False))
+                self.fwhm_check.setChecked(presets.get("use_filter_wfwhm", False))
+                self.stars_check.setChecked(presets.get("use_filter_stars", False))
+                self.bkg_check.setChecked(presets.get("use_filter_bkg", False))
                 self.cleanup_check.setChecked(presets.get("cleanup", False))
-                self.process_separately_check.setChecked(
-                    presets.get("process_separately", False)
-                )
+                target_mode = presets.get("target_mode", "single")
+                # Support legacy presets that used boolean fields
+                if target_mode == "single" and presets.get("paneled_mosaic", False):
+                    target_mode = "paneled"
+                elif target_mode == "single" and presets.get(
+                    "process_separately", False
+                ):
+                    target_mode = "multi"
+                elif target_mode == "single" and presets.get("mono", False):
+                    target_mode = "mono"
+                if target_mode == "paneled" and len(self.sessions) > 1:
+                    self.paneled_mosaic_radio.setChecked(True)
+                elif target_mode == "multi" and len(self.sessions) > 1:
+                    self.multi_target_radio.setChecked(True)
+                elif target_mode == "mono":
+                    self.mono_radio.setChecked(True)
+                else:
+                    self.single_target_radio.setChecked(True)
                 self.create_final_stack_check.setChecked(
                     presets.get("create_final_stack", True)
                 )
-                self.mono_check.setChecked(presets.get("mono", False))
+                self.save_calibrated_lights_check.setChecked(
+                    presets.get("save_calibrated_lights", False)
+                )
+                self.output_norm_check.setChecked(presets.get("output_norm", True))
+                self.weight_stack_check.setChecked(presets.get("stack_weighted", False))
+                self.weight_method_combo.setCurrentText(
+                    presets.get("weighting_method", "Weighted FWHM")
+                )
 
                 # Load session data
                 sessions_data = presets.get("sessions", [])
@@ -1514,12 +2011,26 @@ class PreprocessingInterface(QMainWindow):
                     self.update_process_separately_checkbox()
 
                 self.siril.log(
-                    f"Loaded presets and {len(sessions_data)} sessions from {presets_file}",
+                    f"Loaded presets and {len(sessions_data)} sessions from {filepath}",
                     LogColor.GREEN,
                 )
         except Exception as e:
             self.siril.log(f"Error loading presets: {str(e)}", LogColor.RED)
 
+    def load_presets_from(self):
+        """Load presets from a user-chosen file."""
+        cwd = self.current_working_directory or ""
+        presets_dir = os.path.join(cwd, "presets") if cwd else ""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Presets From",
+            (presets_dir if presets_dir and os.path.exists(presets_dir) else cwd),
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if filepath:
+            self.load_presets(filepath=filepath)
+
+    # TODO: Replace paneled_mosaic boolean with target_mode enum for clarity and scalability
     def run_script(
         self,
         bg_extract: bool = False,
@@ -1530,8 +2041,19 @@ class PreprocessingInterface(QMainWindow):
         feather_amount: float = UI_DEFAULTS["feather_amount"],
         filter_round: float = UI_DEFAULTS["filter_round"],
         filter_wfwhm: float = UI_DEFAULTS["filter_wfwhm"],
+        filter_stars: float = UI_DEFAULTS["filter_stars"],
+        filter_bkg: float = UI_DEFAULTS["filter_bkg"],
+        use_filter_round: bool = False,
+        use_filter_wfwhm: bool = False,
+        use_filter_stars: bool = False,
+        use_filter_bkg: bool = False,
         clean_up_files: bool = False,
         process_separately: bool = False,
+        save_calibrated_lights: bool = False,
+        paneled_mosaic: bool = False,
+        stack_weighted: bool = False,
+        weighting_method: str = "Weighted FWHM",
+        output_norm: bool = True,
     ):
         self.siril.log(
             f"Running script version {VERSION} with arguments:\n"
@@ -1541,11 +2063,20 @@ class PreprocessingInterface(QMainWindow):
             f"pixel_fraction={pixel_fraction}\n"
             f"feather={feather}\n"
             f"feather_amount={feather_amount}\n"
-            f"filter_round={filter_round}\n"
-            f"filter_wfwhm={filter_wfwhm}\n"
+            f"filter_round={filter_round} (enabled={use_filter_round})\n"
+            f"filter_wfwhm={filter_wfwhm} (enabled={use_filter_wfwhm})\n"
+            f"filter_stars={filter_stars} (enabled={use_filter_stars})\n"
+            f"filter_bkg={filter_bkg} (enabled={use_filter_bkg})\n"
             f"clean_up_files={clean_up_files}\n"
             f"process_separately={process_separately}\n"
-            f"build={VERSION}-b01",
+            f"save_calibrated_lights={save_calibrated_lights}\n"
+            f"paneled_mosaic={paneled_mosaic}\n"
+            f"create_final_stack={self.create_final_stack_check.isChecked()}\n"
+            f"save_calibrated_lights={self.save_calibrated_lights_check.isChecked()}\n"
+            f"target_mode={'paneled mosaic' if self.paneled_mosaic_radio.isChecked() else 'multi target' if self.multi_target_radio.isChecked() else 'mono' if self.mono_radio.isChecked() else 'single target'}\n"
+            f"stack_weighted={stack_weighted} method={weighting_method}\n"
+            f"output_norm={output_norm}\n"
+            f"build={VERSION}-{BUILD}",
             LogColor.BLUE,
         )
         self.siril.cmd("close")
@@ -1557,8 +2088,10 @@ class PreprocessingInterface(QMainWindow):
             or os.path.exists("collected_lights")
             or os.path.exists("mono_stacks")
             or os.path.exists("individual_stacks")
+            or os.path.exists("paneled_mosaic_process")
+            or os.path.exists("final_stack_process")
         ):
-            msg = """One or more old processing directories found (sessions, process, collected_lights, mono_stacks, individual_stacks). 
+            msg = """One or more old processing directories found (sessions, process, collected_lights, mono_stacks, individual_stacks, paneled_mosaic_process). 
                 \nDo you want to delete them and start fresh?
                 \nNote: There is no way to recover this data if you choose 'Yes'."""
             answer = QMessageBox.question(
@@ -1589,6 +2122,16 @@ class PreprocessingInterface(QMainWindow):
                     self.siril.log(
                         "Cleaned up old individual_stacks directory", LogColor.BLUE
                     )
+                if os.path.exists("paneled_mosaic_process"):
+                    shutil.rmtree("paneled_mosaic_process")
+                    self.siril.log(
+                        "Cleaned up old paneled_mosaic_process directory", LogColor.BLUE
+                    )
+                if os.path.exists("final_stack_process"):
+                    shutil.rmtree("final_stack_process")
+                    self.siril.log(
+                        "Cleaned up old final_stack_process directory", LogColor.BLUE
+                    )
             else:
                 self.siril.log(
                     "User chose to preserve old processing files. Stopping script.",
@@ -1604,6 +2147,15 @@ class PreprocessingInterface(QMainWindow):
 
         # Get all sessions
         session_to_process = self.get_all_sessions()
+
+        # True when user wants a final stack but hasn't opted to save calibrated lights.
+        # Each session is stacked individually first, then combined at the end.
+        needs_per_session_stack = (
+            self.single_target_radio.isChecked()
+            and self.create_final_stack_check.isChecked()
+            and not save_calibrated_lights
+            and not self.mono_check.isChecked()
+        )
 
         for idx, session in enumerate(
             session_to_process
@@ -1651,29 +2203,48 @@ class PreprocessingInterface(QMainWindow):
 
             # Current directory where files are located
             current_dir = os.path.join(self.current_working_directory, "process")
-            # Mitigate bug: If collected_lights doesn't exist, create it here because sometimes it doesn't get created earlier
-            os.makedirs(self.collected_lights_dir, exist_ok=True)
-            # Find and move all files starting with 'pp_lights'
-            for file_name in os.listdir(current_dir):
-                if file_name.startswith("pp_lights") and file_name.endswith(
-                    self.fits_extension
-                ):
-                    src_path = os.path.join(current_dir, file_name)
 
-                    # Prepend session_name to the filename
-                    new_file_name = f"{session_name}_{file_name}"
-                    dest_path = os.path.join(self.collected_lights_dir, new_file_name)
+            # Only save calibrated lights if requested
+            if save_calibrated_lights:
+                # Mitigate bug: If collected_lights doesn't exist, create it here because sometimes it doesn't get created earlier
+                os.makedirs(self.collected_lights_dir, exist_ok=True)
+                # Find and move all files starting with 'pp_lights'
+                for file_name in os.listdir(current_dir):
+                    if file_name.startswith("pp_lights") and file_name.endswith(
+                        self.fits_extension
+                    ):
+                        src_path = os.path.join(current_dir, file_name)
 
-                    shutil.copy2(src_path, dest_path)
-                    self.siril.log(
-                        f"Moved {file_name} to {self.collected_lights_dir} as {new_file_name}",
-                        LogColor.BLUE,
-                    )
+                        # Prepend session_name to the filename
+                        new_file_name = f"{session_name}_{file_name}"
+                        dest_path = os.path.join(
+                            self.collected_lights_dir, new_file_name
+                        )
+
+                        shutil.copy2(src_path, dest_path)
+                        self.siril.log(
+                            f"Moved {file_name} to {self.collected_lights_dir} as {new_file_name}",
+                            LogColor.BLUE,
+                        )
+            else:
+                self.siril.log(
+                    "Skipping save of calibrated lights (save_calibrated_lights is unchecked)",
+                    LogColor.BLUE,
+                )
 
             # Process separately if requested or mono is selected
-            if process_separately or self.mono_check.isChecked():
+            # IF paneled mosaic, create the individual stacks dir and images in there for later processing
+            if (
+                process_separately
+                or self.mono_check.isChecked()
+                or needs_per_session_stack
+            ):
                 # Create individual_stacks directory
-                dirname = "individual_stacks" if process_separately else "mono_stacks"
+                dirname = (
+                    "mono_stacks"
+                    if self.mono_check.isChecked()
+                    else "individual_stacks"
+                )
                 individual_stacks_dir = os.path.join(self.home_directory, dirname)
                 os.makedirs(individual_stacks_dir, exist_ok=True)
 
@@ -1696,6 +2267,12 @@ class PreprocessingInterface(QMainWindow):
                         pixel_fraction=pixel_fraction,
                         filter_wfwhm=filter_wfwhm,
                         filter_round=filter_round,
+                        filter_stars=filter_stars,
+                        filter_bkg=filter_bkg,
+                        use_filter_round=use_filter_round,
+                        use_filter_wfwhm=use_filter_wfwhm,
+                        use_filter_stars=use_filter_stars,
+                        use_filter_bkg=use_filter_bkg,
                     )
                 else:
                     # If Siril can't plate solve, we apply regular registration with 2pass and then apply registration with max framing
@@ -1710,6 +2287,12 @@ class PreprocessingInterface(QMainWindow):
                         pixel_fraction=pixel_fraction,
                         filter_wfwhm=filter_wfwhm,
                         filter_round=filter_round,
+                        filter_stars=filter_stars,
+                        filter_bkg=filter_bkg,
+                        use_filter_round=use_filter_round,
+                        use_filter_wfwhm=use_filter_wfwhm,
+                        use_filter_stars=use_filter_stars,
+                        use_filter_bkg=use_filter_bkg,
                     )
 
                 individual_seq_name = f"r_{individual_seq_name}"
@@ -1727,6 +2310,9 @@ class PreprocessingInterface(QMainWindow):
                     rejection=True,
                     output_name=individual_stack_name,
                     overlap_norm=False,
+                    output_norm=output_norm,
+                    stack_weighted=stack_weighted,
+                    weighting_method=weighting_method,
                 )
 
                 # Save individual stack
@@ -1880,6 +2466,7 @@ class PreprocessingInterface(QMainWindow):
         if (
             not self.mono_check.isChecked()
             and self.create_final_stack_check.isChecked()
+            and save_calibrated_lights
         ):
             self.siril.cmd("cd", f'"{self.collected_lights_dir}"')
             self.current_working_directory = self.siril.get_siril_wd()
@@ -1927,6 +2514,14 @@ class PreprocessingInterface(QMainWindow):
                     seq_name=seq_name,
                     drizzle_amount=drizzle_amount,
                     pixel_fraction=pixel_fraction,
+                    filter_wfwhm=filter_wfwhm,
+                    filter_round=filter_round,
+                    filter_stars=filter_stars,
+                    filter_bkg=filter_bkg,
+                    use_filter_round=use_filter_round,
+                    use_filter_wfwhm=use_filter_wfwhm,
+                    use_filter_stars=use_filter_stars,
+                    use_filter_bkg=use_filter_bkg,
                 )
             else:
                 # If Siril can't plate solve, we apply regular registration with 2pass and then apply registration with max framing
@@ -1939,6 +2534,14 @@ class PreprocessingInterface(QMainWindow):
                     seq_name=seq_name,
                     drizzle_amount=drizzle_amount,
                     pixel_fraction=pixel_fraction,
+                    filter_wfwhm=filter_wfwhm,
+                    filter_round=filter_round,
+                    filter_stars=filter_stars,
+                    filter_bkg=filter_bkg,
+                    use_filter_round=use_filter_round,
+                    use_filter_wfwhm=use_filter_wfwhm,
+                    use_filter_stars=use_filter_stars,
+                    use_filter_bkg=use_filter_bkg,
                 )
 
             seq_name = f"r_{seq_name}"
@@ -1965,6 +2568,9 @@ class PreprocessingInterface(QMainWindow):
                 rejection=True,
                 output_name=stack_name,
                 overlap_norm=False,
+                output_norm=output_norm,
+                stack_weighted=stack_weighted,
+                weighting_method=weighting_method,
             )
 
             self.load_image(image_name=stack_name)
@@ -1972,11 +2578,345 @@ class PreprocessingInterface(QMainWindow):
             self.current_working_directory = self.siril.get_siril_wd()
             file_name = self.save_image("_og")
             self.load_image(image_name=file_name)
+        elif (
+            not self.mono_check.isChecked()
+            and self.create_final_stack_check.isChecked()
+            and self.multi_target_radio.isChecked()
+        ):
+            self.siril.log(
+                "Final stack creation skipped due to multi-target mode",
+                LogColor.BLUE,
+            )
+        elif needs_per_session_stack:
+            # Single target, create final stack, no save calibrated lights:
+            # combine the per-session individual stacks produced above.
+            self.siril.log(
+                "Building final stack from individual session stacks...",
+                LogColor.BLUE,
+            )
+            individual_stacks_dir = os.path.join(
+                self.home_directory, "individual_stacks"
+            )
+            final_stack_process_dir = os.path.join(
+                self.current_working_directory, "final_stack_process"
+            )
+            os.makedirs(final_stack_process_dir, exist_ok=True)
+
+            fits_files = [
+                fname
+                for fname in os.listdir(individual_stacks_dir)
+                if fname.endswith(self.fits_extension)
+            ]
+            self.siril.log(
+                f"Found {len(fits_files)} individual stack(s) to combine: {fits_files}",
+                LogColor.BLUE,
+            )
+
+            if len(fits_files) == 0:
+                self.siril.log(
+                    "No individual stacks found, skipping final stack.",
+                    LogColor.SALMON,
+                )
+            elif len(fits_files) == 1:
+                # Single session — just load, cd home, save
+                self.siril.cmd("cd", f'"{individual_stacks_dir}"')
+                self.load_image(image_name=os.path.splitext(fits_files[0])[0])
+                self.siril.cmd("cd", f'"{self.home_directory}"')
+                self.current_working_directory = self.siril.get_siril_wd()
+                file_name = self.save_image("_og")
+                self.load_image(image_name=file_name)
+                self.siril.log(f"Final stack saved as {file_name}", LogColor.GREEN)
+            else:
+                # Multiple sessions — copy to final_stack_process, link, plate solve, register, stack
+                for fname in fits_files:
+                    src = os.path.join(individual_stacks_dir, fname)
+                    dst = os.path.join(final_stack_process_dir, fname)
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception as e:
+                        self.siril.log(f"Failed to copy {fname}: {e}", LogColor.RED)
+
+                lights_dir = os.path.join(final_stack_process_dir, "lights")
+                os.makedirs(lights_dir, exist_ok=True)
+                for fname in fits_files:
+                    src = os.path.join(final_stack_process_dir, fname)
+                    dst = os.path.join(lights_dir, fname)
+                    if os.path.exists(src):
+                        shutil.move(src, dst)
+
+                self.siril.cmd("cd", f'"{lights_dir}"')
+                self.siril.cmd("link", "lights")
+                seq_name = "lights_"
+
+                plate_solve_ok = self.seq_plate_solve(seq_name=seq_name)
+                if plate_solve_ok:
+                    try:
+                        self.siril.cmd(
+                            "seqapplyreg", seq_name, "-kernel=square", "-framing=max"
+                        )
+                        seq_name = f"r_{seq_name}"
+                    except (s.DataError, s.CommandError, s.SirilError) as e:
+                        self.siril.log(
+                            f"Could not apply registration: {e}", LogColor.RED
+                        )
+                else:
+                    try:
+                        self.siril.cmd("register", seq_name, "-2pass")
+                        self.siril.cmd("seqapplyreg", seq_name)
+                        seq_name = f"r_{seq_name}"
+                    except (s.DataError, s.CommandError, s.SirilError) as e:
+                        self.siril.log(
+                            f"Could not apply registration: {e}", LogColor.RED
+                        )
+
+                self.seq_stack(
+                    seq_name=seq_name,
+                    feather=feather,
+                    feather_amount=feather_amount,
+                    rejection=True,
+                    output_name="final_stacked",
+                    overlap_norm=False,
+                    output_norm=output_norm,
+                    stack_weighted=stack_weighted,
+                    weighting_method=weighting_method,
+                )
+                self.load_image(image_name="final_stacked")
+                self.siril.cmd("cd", f'"{self.home_directory}"')
+                self.current_working_directory = self.siril.get_siril_wd()
+                file_name = self.save_image("_og")
+                self.load_image(image_name=file_name)
+                self.siril.log(f"Final stack saved as {file_name}", LogColor.GREEN)
         else:
             self.siril.log("Final stack creation skipped", LogColor.BLUE)
+
+        # Paneled mosaic workflow
+        if paneled_mosaic:
+            self.siril.log("Starting paneled mosaic creation...", LogColor.BLUE)
+            individual_stacks_dir = os.path.join(
+                self.home_directory, "individual_stacks"
+            )
+            paneled_mosaic_process_dir = os.path.join(
+                self.current_working_directory, "paneled_mosaic_process"
+            )
+            os.makedirs(paneled_mosaic_process_dir, exist_ok=True)
+
+            # Check if individual_stacks directory exists with stacks
+            if os.path.exists(individual_stacks_dir):
+                self.siril.log(
+                    f"Looking for individual stacks in: {individual_stacks_dir}",
+                    LogColor.BLUE,
+                )
+                # Look for individual stack files (not prefixed with "mono_" unless mono is checked)
+                search_prefix = "mono_" if self.mono_check.isChecked() else ""
+                fits_files = [
+                    fname
+                    for fname in os.listdir(individual_stacks_dir)
+                    if fname.endswith(self.fits_extension)
+                    and fname.startswith(search_prefix)
+                ]
+
+                self.siril.log(
+                    f"Found {len(fits_files)} individual stack files: {fits_files}",
+                    LogColor.BLUE,
+                )
+
+                if len(fits_files) > 1:
+                    # Copy individual stacks to the paneled_mosaic_process directory
+                    self.siril.log(
+                        f"Copying {len(fits_files)} stacks to paneled_mosaic_process...",
+                        LogColor.BLUE,
+                    )
+                    for fname in fits_files:
+                        src = os.path.join(individual_stacks_dir, fname)
+                        dst = os.path.join(paneled_mosaic_process_dir, fname)
+                        try:
+                            shutil.copy2(src, dst)
+                            self.siril.log(f"Copied {fname}", LogColor.BLUE)
+                        except Exception as e:
+                            self.siril.log(f"Failed to copy {fname}: {e}", LogColor.RED)
+
+                    # Change directory to paneled_mosaic_process
+                    self.siril.cmd("cd", f'"{paneled_mosaic_process_dir}"')
+                    self.current_working_directory = self.siril.get_siril_wd()
+
+                    # Create a lights folder for conversion
+                    lights_dir = os.path.join(paneled_mosaic_process_dir, "lights")
+                    os.makedirs(lights_dir, exist_ok=True)
+                    self.siril.log(f"Moving files to {lights_dir}...", LogColor.BLUE)
+                    for fname in fits_files:
+                        src = os.path.join(paneled_mosaic_process_dir, fname)
+                        dst = os.path.join(lights_dir, fname)
+                        try:
+                            if os.path.exists(src):
+                                shutil.move(src, dst)
+                                self.siril.log(
+                                    f"Moved {fname} to lights/", LogColor.BLUE
+                                )
+                            else:
+                                self.siril.log(
+                                    f"Source file not found: {src}", LogColor.SALMON
+                                )
+                        except Exception as e:
+                            self.siril.log(f"Failed to move {fname}: {e}", LogColor.RED)
+
+                    # Verify files exist in lights directory
+                    lights_files = (
+                        os.listdir(lights_dir) if os.path.exists(lights_dir) else []
+                    )
+                    self.siril.log(
+                        f"Lights directory now contains: {lights_files}",
+                        LogColor.BLUE,
+                    )
+
+                    # Link FITS files to create sequence (cd into lights directory first)
+                    self.siril.cmd("cd", f'"{lights_dir}"')
+                    args = ["link", "lights"]
+                    self.siril.log(" ".join(str(arg) for arg in args), LogColor.GREEN)
+                    self.siril.cmd(*args)
+
+                    # All sequence processing happens in the lights directory
+                    seq_name = "lights_"
+
+                    # Plate solve the sequence (without filters)
+                    self.siril.log(
+                        f"Plate solving paneled mosaic sequence {seq_name}...",
+                        LogColor.BLUE,
+                    )
+                    try:
+                        self.seq_plate_solve(seq_name=seq_name)
+                        # self.siril.cmd(
+                        #     "seqplatesolve",
+                        #     seq_name,
+                        # )
+                        self.siril.log(f"Plate solved {seq_name}", LogColor.GREEN)
+                        plate_solve_ok = True
+                    except (s.DataError, s.CommandError, s.SirilError) as e:
+                        self.siril.log(
+                            f"Plate solve failed for paneled mosaic: {e}",
+                            LogColor.RED,
+                        )
+                        plate_solve_ok = False
+
+                    if plate_solve_ok:
+                        # Apply registration (no drizzle, no filters)
+                        try:
+                            self.siril.cmd(
+                                "seqapplyreg",
+                                seq_name,
+                                "-kernel=square",
+                                "-framing=max",
+                            )
+                            self.siril.log(
+                                f"Applied registration to {seq_name}",
+                                LogColor.GREEN,
+                            )
+                            seq_name = f"r_{seq_name}"
+                        except (s.DataError, s.CommandError, s.SirilError) as e:
+                            self.siril.log(
+                                f"Could not apply registration: {e}", LogColor.RED
+                            )
+                    else:
+                        # TODO: Test this path
+                        # Regular registration if plate solve failed
+                        try:
+                            self.siril.cmd("register", seq_name, "-2pass")
+                            self.siril.cmd("seqapplyreg", seq_name)
+                            seq_name = f"r_{seq_name}"
+                        except (s.DataError, s.CommandError, s.SirilError) as e:
+                            self.siril.log(
+                                f"Could not apply regular registration: {e}",
+                                LogColor.RED,
+                            )
+
+                    # Stack with overlap_norm=True (happens in lights directory)
+                    # stack r_lights_  rej none -norm=addscale -output_norm -overlap_norm -rgb_equal -maximize -filter-included -weight=wfwhm -out=paneled_mosaic_stacked -feather=70
+                    # Don't reject and don't weigh final panel stack
+                    self.seq_stack(
+                        seq_name=seq_name,
+                        feather=feather,
+                        feather_amount=feather_amount,
+                        rejection=False,
+                        output_name="paneled_mosaic_stacked",
+                        overlap_norm=True,
+                        output_norm=output_norm,
+                        stack_weighted=False,
+                        weighting_method=weighting_method,
+                    )
+
+                    # self.siril.cmd(
+                    #     "stack",
+                    #     f"{seq_name}",
+                    #     " rej none",
+                    #     "-norm=addscale",
+                    #     "-output_norm",
+                    #     "-overlap_norm",
+                    #     "-rgb_equal",
+                    #     "-maximize",
+                    #     "-filter-included",
+                    #     f"-feather={feather_amount}",
+                    #     "-out=paneled_mosaic_stacked",
+                    # )
+
+                    # # Return to paneled_mosaic_process directory
+                    # self.siril.cmd("cd", "..")
+
+                    # Move final stack to home directory
+                    try:
+                        # Stacked file is in the lights subdirectory
+                        paneled_mosaic_file = os.path.join(
+                            lights_dir,
+                            f"paneled_mosaic_stacked{self.fits_extension}",
+                        )
+                        if os.path.exists(paneled_mosaic_file):
+                            final_location = os.path.join(
+                                self.home_directory,
+                                f"paneled_mosaic_final{self.fits_extension}",
+                            )
+                            self.load_image(image_name="paneled_mosaic_stacked")
+                            print(rf"Home directory: {self.home_directory}")
+                            # home_dir = f"{self.home_directory}"
+                            self.siril.cmd("cd", f'"{self.home_directory}"')
+                            self.save_image("_paneled_mosaic_final")
+                            self.siril.log(
+                                f"Paneled mosaic final stack saved to {final_location}",
+                                LogColor.GREEN,
+                            )
+                        else:
+                            self.siril.log(
+                                f"Could not find paneled_mosaic_stacked{self.fits_extension}",
+                                LogColor.RED,
+                            )
+                    except Exception as e:
+                        self.siril.log(
+                            f"Error saving paneled mosaic final stack: {e}",
+                            LogColor.RED,
+                        )
+
+                    # self.siril.cmd("cd", self.current_working_directory)
+
+                else:
+                    self.siril.log(
+                        "Not enough individual stacks for paneled mosaic (need at least 2)",
+                        LogColor.SALMON,
+                    )
+            else:
+                self.siril.log(
+                    f"Individual stacks directory not found, skipping paneled mosaic",
+                    LogColor.SALMON,
+                )
+
         # Delete the blank sessions dir
         if clean_up_files:
-            shutil.rmtree(os.path.join(self.current_working_directory, "sessions"))
+            try:
+                shutil.rmtree(
+                    os.path.join(self.current_working_directory, "sessions"),
+                    ignore_errors=True,
+                )
+            except Exception as e:
+                self.siril.log(
+                    f"Error cleaning up sessions directory {os.path.join(self.current_working_directory, 'sessions')}: {e}",
+                    LogColor.SALMON,
+                )
             extension = self.fits_extension.lstrip(".")
             collected_lights_dir = os.path.join(
                 self.current_working_directory, "collected_lights"
@@ -1989,8 +2929,12 @@ class PreprocessingInterface(QMainWindow):
                         filename.startswith("session") and filename.endswith(extension)
                     ):
                         os.remove(file_path)
-                shutil.rmtree(os.path.join(collected_lights_dir, "cache"))
-                shutil.rmtree(os.path.join(collected_lights_dir, "drizztmp"))
+                shutil.rmtree(
+                    os.path.join(collected_lights_dir, "cache"), ignore_errors=True
+                )
+                shutil.rmtree(
+                    os.path.join(collected_lights_dir, "drizztmp"), ignore_errors=True
+                )
 
                 self.siril.log("Cleaned up collected_lights directory", LogColor.BLUE)
             except Exception as e:
@@ -2000,17 +2944,42 @@ class PreprocessingInterface(QMainWindow):
 
             if self.mono_check.isChecked():
                 shutil.rmtree(
-                    os.path.join(self.current_working_directory, "mono_process")
+                    os.path.join(self.current_working_directory, "mono_process"),
+                    ignore_errors=True,
                 )
                 shutil.rmtree(
                     os.path.join(
                         self.current_working_directory, "mono_stacks", "lights"
-                    )
+                    ),
+                    ignore_errors=True,
                 )
                 self.siril.log("Cleaned up mono_process directory", LogColor.BLUE)
+
+            # Clean up paneled_mosaic_process but preserve individual_stacks
+            paneled_mosaic_process_dir = os.path.join(
+                self.current_working_directory, "paneled_mosaic_process"
+            )
+            if os.path.exists(paneled_mosaic_process_dir):
+                try:
+                    shutil.rmtree(paneled_mosaic_process_dir, ignore_errors=True)
+                    self.siril.log(
+                        "Cleaned up paneled_mosaic_process directory", LogColor.BLUE
+                    )
+                except Exception as e:
+                    self.siril.log(
+                        f"Could not clean up paneled_mosaic_process: {e}",
+                        LogColor.SALMON,
+                    )
+
             try:
-                shutil.rmtree(os.path.join(self.current_working_directory, "cache"))
-                shutil.rmtree(os.path.join(self.current_working_directory, "drizztmp"))
+                shutil.rmtree(
+                    os.path.join(self.current_working_directory, "cache"),
+                    ignore_errors=True,
+                )
+                shutil.rmtree(
+                    os.path.join(self.current_working_directory, "drizztmp"),
+                    ignore_errors=True,
+                )
                 self.siril.log(
                     "Cleaned up extra cache and drizztmp directories", LogColor.BLUE
                 )
