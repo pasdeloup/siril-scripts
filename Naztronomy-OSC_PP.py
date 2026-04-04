@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 
 Naztronomy - OSC Image Preprocessing script
-Version: 2.0.1
+Version: 2.0.2
 =====================================
 
 The author of this script is Nazmus Nasir (Naztronomy) and can be reached at:
@@ -27,6 +27,7 @@ allows you to choose files from any folder and drive and they will all be consol
 
 """
 CHANGELOG:
+2.0.2 - Bug fixes - bias and BGE colliding
 2.0.1 - Single/Multi/Paneled mosaic workflows 
       - Allow stacking multiple targets at the same time (without combining them at the end)
       - Single target session can combine everything at once or do it by session/panel
@@ -920,13 +921,13 @@ class PreprocessingInterface(QMainWindow):
             cmd_args.append("-flat=flats_stacked")
 
         # apply bias to lights because it does magic
-        if os.path.exists(
-            os.path.join(
-                self.current_working_directory,
-                f"process/biases_stacked{self.fits_extension}",
-            )
-        ):
-            cmd_args.append("-bias=biases_stacked")
+        # if os.path.exists(
+        #     os.path.join(
+        #         self.current_working_directory,
+        #         f"process/biases_stacked{self.fits_extension}",
+        #     )
+        # ):
+        #     cmd_args.append("-bias=biases_stacked")
         cmd_args.extend(["-cfa", "-equalize_cfa"])
         # cmd_args = [
         #     "calibrate",
@@ -2102,33 +2103,33 @@ class PreprocessingInterface(QMainWindow):
             )
             if answer == QMessageBox.StandardButton.Yes:
                 if os.path.exists("sessions"):
-                    shutil.rmtree("sessions")
+                    shutil.rmtree("sessions", ignore_errors=True)
                     self.siril.log("Cleaned up old sessions directories", LogColor.BLUE)
                 if os.path.exists("process"):
-                    shutil.rmtree("process")
+                    shutil.rmtree("process", ignore_errors=True)
                     self.siril.log("Cleaned up old process directory", LogColor.BLUE)
                 if os.path.exists("collected_lights"):
-                    shutil.rmtree("collected_lights")
+                    shutil.rmtree("collected_lights", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old collected_lights directory", LogColor.BLUE
                     )
                 if os.path.exists("mono_stacks"):
-                    shutil.rmtree("mono_stacks")
+                    shutil.rmtree("mono_stacks", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old mono_stacks directory", LogColor.BLUE
                     )
                 if os.path.exists("individual_stacks"):
-                    shutil.rmtree("individual_stacks")
+                    shutil.rmtree("individual_stacks", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old individual_stacks directory", LogColor.BLUE
                     )
                 if os.path.exists("paneled_mosaic_process"):
-                    shutil.rmtree("paneled_mosaic_process")
+                    shutil.rmtree("paneled_mosaic_process", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old paneled_mosaic_process directory", LogColor.BLUE
                     )
                 if os.path.exists("final_stack_process"):
-                    shutil.rmtree("final_stack_process")
+                    shutil.rmtree("final_stack_process", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old final_stack_process directory", LogColor.BLUE
                     )
@@ -2359,7 +2360,8 @@ class PreprocessingInterface(QMainWindow):
                 shutil.rmtree(
                     os.path.join(
                         self.current_working_directory, "sessions", session_name
-                    )
+                    ),
+                    ignore_errors=True,
                 )
 
             self.siril.cmd("close")
@@ -2605,7 +2607,7 @@ class PreprocessingInterface(QMainWindow):
             fits_files = [
                 fname
                 for fname in os.listdir(individual_stacks_dir)
-                if fname.endswith(self.fits_extension)
+                if fname.endswith(self.fits_extension) and not fname.startswith(".")
             ]
             self.siril.log(
                 f"Found {len(fits_files)} individual stack(s) to combine: {fits_files}",
