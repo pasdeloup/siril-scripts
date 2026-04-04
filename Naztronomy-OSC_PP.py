@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 
 Naztronomy - OSC Image Preprocessing script
-Version: 2.0.2
+Version: 2.0.3
 =====================================
 
 The author of this script is Nazmus Nasir (Naztronomy) and can be reached at:
@@ -28,7 +28,7 @@ allows you to choose files from any folder and drive and they will all be consol
 """
 CHANGELOG:
 
-2.0.2 - Files tab UI overhaul
+2.0.3 - Files tab UI overhaul
       - Drag and drop files directly onto the file list
       - Frame type selection dialog on drop (Lights, Darks, Flats, Biases)
       - Master calibration frame support via drag & drop (Master Dark, Master Flat, Master Bias)
@@ -41,6 +41,7 @@ CHANGELOG:
       - Files tab split into two group boxes: Session Management (top) and Files in Session N (bottom)
       - Session content group box title updates dynamically to show current session number
       - Next / Back single toggle button for navigating between tabs (styled white with dark border)
+2.0.2 - Bug fixes - bias and BGE colliding
 2.0.1 - Single/Multi/Paneled mosaic workflows 
       - Allow stacking multiple targets at the same time (without combining them at the end)
       - Single target session can combine everything at once or do it by session/panel
@@ -119,8 +120,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
-VERSION = "2.0.2"
-BUILD = "20260331"
+VERSION = "2.0.3"
+BUILD = "20260405"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "https://www.Naztronomy.com"
 YOUTUBE = "https://www.YouTube.com/Naztronomy"
