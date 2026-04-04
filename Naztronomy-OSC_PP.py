@@ -92,8 +92,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
-VERSION = "2.0.1"
-BUILD = "20260326"
+VERSION = "2.0.2"
+BUILD = "20260403"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "https://www.Naztronomy.com"
 YOUTUBE = "https://www.YouTube.com/Naztronomy"
