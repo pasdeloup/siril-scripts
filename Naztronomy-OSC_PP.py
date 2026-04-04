@@ -1283,11 +1283,14 @@ class PreprocessingInterface(QMainWindow):
             cmd_args.append("-flat=flats_stacked")
 
         # apply bias to lights because it does magic
-        if os.path.exists(
-            os.path.join(
-                self.current_working_directory,
-                f"process/biases_stacked{self.fits_extension}",
+        if (
+            os.path.exists(
+                os.path.join(
+                    self.current_working_directory,
+                    f"process/biases_stacked{self.fits_extension}",
+                )
             )
+            and not self.bg_extract_check.isChecked()
         ):
             cmd_args.append("-bias=biases_stacked")
         cmd_args.extend(["-cfa", "-equalize_cfa"])
@@ -2520,33 +2523,33 @@ class PreprocessingInterface(QMainWindow):
             )
             if answer == QMessageBox.StandardButton.Yes:
                 if os.path.exists("sessions"):
-                    shutil.rmtree("sessions")
+                    shutil.rmtree("sessions", ignore_errors=True)
                     self.siril.log("Cleaned up old sessions directories", LogColor.BLUE)
                 if os.path.exists("process"):
-                    shutil.rmtree("process")
+                    shutil.rmtree("process", ignore_errors=True)
                     self.siril.log("Cleaned up old process directory", LogColor.BLUE)
                 if os.path.exists("collected_lights"):
-                    shutil.rmtree("collected_lights")
+                    shutil.rmtree("collected_lights", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old collected_lights directory", LogColor.BLUE
                     )
                 if os.path.exists("mono_stacks"):
-                    shutil.rmtree("mono_stacks")
+                    shutil.rmtree("mono_stacks", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old mono_stacks directory", LogColor.BLUE
                     )
                 if os.path.exists("individual_stacks"):
-                    shutil.rmtree("individual_stacks")
+                    shutil.rmtree("individual_stacks", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old individual_stacks directory", LogColor.BLUE
                     )
                 if os.path.exists("paneled_mosaic_process"):
-                    shutil.rmtree("paneled_mosaic_process")
+                    shutil.rmtree("paneled_mosaic_process", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old paneled_mosaic_process directory", LogColor.BLUE
                     )
                 if os.path.exists("final_stack_process"):
-                    shutil.rmtree("final_stack_process")
+                    shutil.rmtree("final_stack_process", ignore_errors=True)
                     self.siril.log(
                         "Cleaned up old final_stack_process directory", LogColor.BLUE
                     )
@@ -2777,7 +2780,8 @@ class PreprocessingInterface(QMainWindow):
                 shutil.rmtree(
                     os.path.join(
                         self.current_working_directory, "sessions", session_name
-                    )
+                    ),
+                    ignore_errors=True,
                 )
 
             self.siril.cmd("close")
