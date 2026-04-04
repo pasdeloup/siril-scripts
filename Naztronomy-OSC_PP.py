@@ -2376,7 +2376,9 @@ class PreprocessingInterface(QMainWindow):
             fits_files = [
                 fname
                 for fname in os.listdir(mono_dir)
-                if fname.startswith("mono_") and fname.endswith(self.fits_extension)
+                if fname.startswith("mono_")
+                and fname.endswith(self.fits_extension)
+                and not fname.startswith(".")
             ]
             self.siril.log(
                 f"Found {len(fits_files)} mono_*.fits files in {mono_dir}",
@@ -2715,6 +2717,7 @@ class PreprocessingInterface(QMainWindow):
                     for fname in os.listdir(individual_stacks_dir)
                     if fname.endswith(self.fits_extension)
                     and fname.startswith(search_prefix)
+                    and not fname.startswith(".")
                 ]
 
                 self.siril.log(
