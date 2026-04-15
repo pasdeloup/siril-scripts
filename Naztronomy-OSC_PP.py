@@ -59,7 +59,6 @@ CHANGELOG:
 """
 
 
-from operator import index
 from pathlib import Path
 import shutil
 import sirilpy as s
@@ -1319,7 +1318,7 @@ class PreprocessingInterface(QMainWindow):
         ):
             cmd_args.append("-flat=flats_stacked")
 
-        # apply bias to lights because it does magic
+        # apply dark flats to lights if using that instead of bias frames
         if (
             os.path.exists(
                 os.path.join(
@@ -1327,6 +1326,7 @@ class PreprocessingInterface(QMainWindow):
                     f"process/biases_stacked{self.fits_extension}",
                 )
             )
+            and self.dark_flats_check.isChecked()
             # and not self.bg_extract_check.isChecked()
         ):
             cmd_args.append("-bias=biases_stacked")
@@ -2263,6 +2263,7 @@ class PreprocessingInterface(QMainWindow):
         If filepath is None, saves to the default location."""
         # Collect settings
         presets = {
+            "dark_flats": self.dark_flats_check.isChecked(),
             "bg_extract": self.bg_extract_check.isChecked(),
             "drizzle": self.drizzle_checkbox.isChecked(),
             "drizzle_amount": round(self.drizzle_amount_spinbox.value(), 1),
@@ -2388,6 +2389,7 @@ class PreprocessingInterface(QMainWindow):
                 presets = json.load(f)
 
                 # Load UI settings
+                self.dark_flats_check.setChecked(presets.get("dark_flats", False))
                 self.bg_extract_check.setChecked(presets.get("bg_extract", False))
                 self.drizzle_checkbox.setChecked(presets.get("drizzle", False))
                 self.drizzle_amount_spinbox.setValue(presets.get("drizzle_amount", 1.0))
@@ -2520,6 +2522,7 @@ class PreprocessingInterface(QMainWindow):
     ):
         self.siril.log(
             f"Running script version {VERSION} with arguments:\n"
+            f"dark_flats={self.dark_flats_check.isChecked()}\n"
             f"bg_extract={bg_extract}\n"
             f"drizzle={drizzle}\n"
             f"drizzle_amount={drizzle_amount}\n"
