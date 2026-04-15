@@ -64,7 +64,7 @@ from pathlib import Path
 import shutil
 import sirilpy as s
 
-s.ensure_installed("PyQt6", "numpy", "astropy", "pyqtdarktheme-fork")
+s.ensure_installed("PyQt6", "numpy", "astropy", "qt_themes")
 
 
 from PyQt6.QtCore import Qt, QUrl
@@ -116,7 +116,7 @@ import time
 import os
 import sys
 import json
-import qdarktheme
+import qt_themes
 from sirilpy import LogColor, NoImageError
 from astropy.io import fits
 import numpy as np
@@ -259,6 +259,7 @@ class FileTypeDialog(QDialog):
         self._current_session_index = current_session_index
         self.setWindowTitle("Select Frame Type")
         self.setModal(True)
+        self.setMinimumWidth(320)
         self.chosen_type: str | None = None
         self.chosen_scope: str = "current"  # "current", "selected", or "all"
         self.chosen_session_indices: list = [current_session_index]
@@ -273,8 +274,14 @@ class FileTypeDialog(QDialog):
 
         for frame_type in self.FRAME_TYPES:
             btn = QPushButton(frame_type)
-            btn.setMinimumHeight(32)
-            btn.clicked.connect(lambda checked, t=frame_type: self._select(t))
+            btn.setMinimumHeight(50)
+            btn.setMinimumWidth(100)
+            if frame_type.lower() == "lights":
+                btn.clicked.connect(lambda checked, t=frame_type: self._select(t))
+            else:
+                btn.clicked.connect(
+                    lambda checked, t=frame_type: self._select_master(t)
+                )
             layout.addWidget(btn)
 
         sep = QLabel("— Master calibration frames —")
@@ -286,7 +293,8 @@ class FileTypeDialog(QDialog):
 
         for master_type in self.MASTER_TYPES:
             btn = QPushButton(master_type)
-            btn.setMinimumHeight(32)
+            btn.setMinimumHeight(50)
+            btn.setMinimumWidth(100)
             btn.setStyleSheet(
                 "QPushButton { background-color: #e8f4e8; color: #1d4e2d; }"
                 " QPushButton:hover { background-color: #c3e6cb; }"
@@ -304,6 +312,12 @@ class FileTypeDialog(QDialog):
         self.accept()
 
     def _select_master(self, frame_type: str):
+        if len(self._all_session_names) <= 1:
+            self.chosen_type = frame_type
+            self.chosen_scope = "current"
+            self.accept()
+            return
+
         sub = QDialog(self)
         sub.setWindowTitle("Apply to which sessions?")
         sub.setModal(True)
@@ -3433,7 +3447,8 @@ class PreprocessingInterface(QMainWindow):
 def main():
     try:
         app = QApplication(sys.argv)
-        qdarktheme.setup_theme()
+        # qdarktheme.setup_theme()
+        qt_themes.set_theme("dracula")
         window = PreprocessingInterface()
         # Only show window if initialization was successful
         if window.initialization_successful:
