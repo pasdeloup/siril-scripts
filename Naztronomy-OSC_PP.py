@@ -937,7 +937,13 @@ class PreprocessingInterface(QMainWindow):
                     f"Only one file found in {image_type} directory. Treating it like a master {image_type} frame.",
                     LogColor.BLUE,
                 )
-                src = os.path.join(directory, os.listdir(directory)[0])
+                first_file = next(
+                    name
+                    for name in os.listdir(directory)
+                    if os.path.isfile(os.path.join(directory, name))
+                    and not name.startswith(".")
+                )
+                src = os.path.join(directory, first_file)
 
                 dst = os.path.join(
                     self.current_working_directory,
@@ -955,9 +961,21 @@ class PreprocessingInterface(QMainWindow):
                 return False
             else:
                 try:
-                    # using `link` to only get fits files
-                    args = ["link", image_type, "-out=../process"]
-                    # args = ["convert", image_type, "-out=../process"]
+                    # Check file extension to determine whether to use link or convert. Fixes bug for other raw files
+                    first_file = next(
+                        name
+                        for name in os.listdir(directory)
+                        if os.path.isfile(os.path.join(directory, name))
+                        and not name.startswith(".")
+                    )
+                    file_ext = os.path.splitext(first_file)[1].lower()
+                    fits_extensions = [".fit", ".fits", ".fit.fz", ".fits.fz"]
+
+                    if file_ext in fits_extensions:
+                        args = ["link", image_type, "-out=../process"]
+                    else:
+                        args = ["convert", image_type, "-out=../process"]
+
                     # if "lights" in image_type.lower():
                     #     if not self.drizzle_status:
                     #         args.append("-debayer")
