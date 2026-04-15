@@ -64,6 +64,9 @@ from pathlib import Path
 import shutil
 import sirilpy as s
 
+s.ensure_installed("PyQt6", "numpy", "astropy", "pyqtdarktheme-fork")
+
+
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import (
     QApplication,
@@ -113,6 +116,7 @@ import time
 import os
 import sys
 import json
+import qdarktheme
 from sirilpy import LogColor, NoImageError
 from astropy.io import fits
 import numpy as np
@@ -1291,7 +1295,7 @@ class PreprocessingInterface(QMainWindow):
                     f"process/biases_stacked{self.fits_extension}",
                 )
             )
-            and not self.bg_extract_check.isChecked()
+            # and not self.bg_extract_check.isChecked()
         ):
             cmd_args.append("-bias=biases_stacked")
         cmd_args.extend(["-cfa", "-equalize_cfa"])
@@ -1729,24 +1733,29 @@ class PreprocessingInterface(QMainWindow):
         processing_layout = QVBoxLayout(scroll_content)
 
         # Drizzle settings
-        drizzle_group = QGroupBox("Optional Preprocessing Steps")
-        drizzle_layout = QVBoxLayout()
+        preprocessing_group = QGroupBox("Optional Preprocessing Steps")
+        preprocessing_layout = QVBoxLayout()
+
+        dark_flats_tooltip = "If your bias frames are dark flats instead, check this box. It'll be properly applied to the light frames during calibration."
+        self.dark_flats_check = QCheckBox("Using Dark Flats?")
+        self.dark_flats_check.setToolTip(dark_flats_tooltip)
+        preprocessing_layout.addWidget(self.dark_flats_check)
 
         cleanup_tooltip = "Enable this option to delete all intermediary files after they are done processing. This saves space on your hard drive.\nNote: If your session is batched, this option is automatically enabled even if it's unchecked!"
         self.cleanup_check = QCheckBox("Clean up intermediate files")
         self.cleanup_check.setToolTip(cleanup_tooltip)
-        drizzle_layout.addWidget(self.cleanup_check)
+        preprocessing_layout.addWidget(self.cleanup_check)
 
         bg_extract_tooltip = "Removes background gradients from your images before stacking. Uses Polynomial value 1 and 10 samples."
 
         self.bg_extract_check = QCheckBox("Background Extraction")
         self.bg_extract_check.setToolTip(bg_extract_tooltip)
-        drizzle_layout.addWidget(self.bg_extract_check)
+        preprocessing_layout.addWidget(self.bg_extract_check)
 
         drizzle_tooltip = "Drizzle integration can improve resolution but increases processing time and file size. Use values above 1.0 with caution."
         self.drizzle_checkbox = QCheckBox("Enable Drizzle")
         self.drizzle_checkbox.setToolTip(drizzle_tooltip)
-        drizzle_layout.addWidget(self.drizzle_checkbox)
+        preprocessing_layout.addWidget(self.drizzle_checkbox)
 
         drizzle_amount_tooltip = "Scale factor for drizzle integration. Values between 1.0 and 3.0 are typical. \nNote: Higher values increase processing time and file size."
         drizzle_amount_layout = QHBoxLayout()
@@ -1764,7 +1773,7 @@ class PreprocessingInterface(QMainWindow):
         self.drizzle_amount_spinbox.setToolTip(drizzle_amount_tooltip)
         drizzle_amount_layout.addWidget(drizzle_amount_label)
         drizzle_amount_layout.addWidget(self.drizzle_amount_spinbox)
-        drizzle_layout.addLayout(drizzle_amount_layout)
+        preprocessing_layout.addLayout(drizzle_amount_layout)
 
         self.drizzle_checkbox.toggled.connect(self.drizzle_amount_spinbox.setEnabled)
 
@@ -1782,16 +1791,16 @@ class PreprocessingInterface(QMainWindow):
         self.pixel_fraction_spinbox.setToolTip(pixel_fraction_label_tooltip)
         pixel_fraction_layout.addWidget(pixel_fraction_label)
         pixel_fraction_layout.addWidget(self.pixel_fraction_spinbox)
-        drizzle_layout.addLayout(pixel_fraction_layout)
+        preprocessing_layout.addLayout(pixel_fraction_layout)
 
         self.drizzle_checkbox.toggled.connect(self.pixel_fraction_spinbox.setEnabled)
 
-        drizzle_group.setLayout(drizzle_layout)
-        processing_layout.addWidget(drizzle_group)
+        preprocessing_group.setLayout(preprocessing_layout)
+        processing_layout.addWidget(preprocessing_group)
 
         # Registration settings
-        reg_group = QGroupBox("Optional Filter Settings")
-        reg_layout = QVBoxLayout()
+        filter_group = QGroupBox("Optional Filter Settings")
+        filter_layout = QVBoxLayout()
 
         # Roundness filter
         roundness_label_tooltip = "Filters images by star roundness, calculated using the second moments of detected stars. \nA lower roundness value applies a stricter filter, keeping only frames with well-defined, circular stars. Higher roundness values allow more variation in star shapes."
@@ -1821,7 +1830,7 @@ class PreprocessingInterface(QMainWindow):
         roundness_layout.addWidget(self.roundness_check)
         roundness_layout.addWidget(self.roundness_spinbox)
         roundness_layout.addWidget(self.roundness_mode_combo)
-        reg_layout.addLayout(roundness_layout)
+        filter_layout.addLayout(roundness_layout)
 
         # FWHM filter
         fwhm_label_tooltip = "Filters images by weighted Full Width at Half Maximum (FWHM), calculated using star sharpness. \nA lower sigma value applies a stricter filter, keeping only frames close to the median FWHM. Higher sigma allows more variation."
@@ -1851,7 +1860,7 @@ class PreprocessingInterface(QMainWindow):
         fwhm_layout.addWidget(self.fwhm_check)
         fwhm_layout.addWidget(self.fwhm_spinbox)
         fwhm_layout.addWidget(self.fwhm_mode_combo)
-        reg_layout.addLayout(fwhm_layout)
+        filter_layout.addLayout(fwhm_layout)
 
         # Star count filter
         stars_label_tooltip = "Filters images by star count. Frames with significantly fewer stars than the median are excluded. \nA lower sigma value applies a stricter filter. Higher sigma allows more variation."
@@ -1881,7 +1890,7 @@ class PreprocessingInterface(QMainWindow):
         stars_layout.addWidget(self.stars_check)
         stars_layout.addWidget(self.stars_spinbox)
         stars_layout.addWidget(self.stars_mode_combo)
-        reg_layout.addLayout(stars_layout)
+        filter_layout.addLayout(stars_layout)
 
         # Background filter
         bkg_label_tooltip = "Filters images by background level. Frames with a significantly higher background than the median are excluded. \nA lower sigma value applies a stricter filter. Higher sigma allows more variation."
@@ -1911,14 +1920,14 @@ class PreprocessingInterface(QMainWindow):
         bkg_layout.addWidget(self.bkg_check)
         bkg_layout.addWidget(self.bkg_spinbox)
         bkg_layout.addWidget(self.bkg_mode_combo)
-        reg_layout.addLayout(bkg_layout)
+        filter_layout.addLayout(bkg_layout)
 
-        reg_group.setLayout(reg_layout)
-        processing_layout.addWidget(reg_group)
+        filter_group.setLayout(filter_layout)
+        processing_layout.addWidget(filter_group)
 
         # Stacking settings
-        stack_group = QGroupBox("Stacking Settings")
-        stack_layout = QVBoxLayout()
+        stacking_group = QGroupBox("Stacking Settings")
+        stacking_layout = QVBoxLayout()
 
         feather_tooltip = "Blends the edges of stacked frames to reduce edge artifacts in the final image."
         feather_amount_tooltip = "Size of the feathering blend in pixels. Larger values create smoother transitions but may affect more of the image edge."
@@ -1935,7 +1944,7 @@ class PreprocessingInterface(QMainWindow):
         self.feather_amount_spinbox.setToolTip(feather_amount_tooltip)
         feather_layout.addWidget(self.feather_checkbox)
         feather_layout.addWidget(self.feather_amount_spinbox)
-        stack_layout.addLayout(feather_layout)
+        stacking_layout.addLayout(feather_layout)
 
         self.feather_checkbox.toggled.connect(self.feather_amount_spinbox.setEnabled)
 
@@ -1952,18 +1961,18 @@ class PreprocessingInterface(QMainWindow):
         self.weight_stack_check.toggled.connect(self.weight_method_combo.setEnabled)
         weight_layout.addWidget(self.weight_stack_check)
         weight_layout.addWidget(self.weight_method_combo)
-        stack_layout.addLayout(weight_layout)
+        stacking_layout.addLayout(weight_layout)
 
         save_calibrated_lights_tooltip = "Save calibrated light frames after processing. Allows you to collect everything even if you don't create stacks immediately."
         self.save_calibrated_lights_check = QCheckBox("Save calibrated lights")
         self.save_calibrated_lights_check.setToolTip(save_calibrated_lights_tooltip)
-        stack_layout.addWidget(self.save_calibrated_lights_check)
+        stacking_layout.addWidget(self.save_calibrated_lights_check)
 
         output_norm_tooltip = "Normalize the output stack so pixel values are scaled relatively. Recommended for most use cases. Turn it OFF for photometry or if you see strange artifacts in where your background is clipping to zero."
         self.output_norm_check = QCheckBox("Output normalization")
         self.output_norm_check.setToolTip(output_norm_tooltip)
         self.output_norm_check.setChecked(True)
-        stack_layout.addWidget(self.output_norm_check)
+        stacking_layout.addWidget(self.output_norm_check)
 
         # Target mode radio buttons
         target_mode_box = QGroupBox("Target Mode")
@@ -2007,7 +2016,7 @@ class PreprocessingInterface(QMainWindow):
         target_mode_layout.addWidget(self.paneled_mosaic_radio)
         target_mode_layout.addWidget(self.mono_radio)
         target_mode_box.setLayout(target_mode_layout)
-        stack_layout.addWidget(target_mode_box)
+        stacking_layout.addWidget(target_mode_box)
 
         self.target_mode_button_group.buttonToggled.connect(self.on_target_mode_changed)
 
@@ -2016,10 +2025,10 @@ class PreprocessingInterface(QMainWindow):
         self.create_final_stack_check = QCheckBox("Create final stack")
         self.create_final_stack_check.setToolTip(create_final_stack_tooltip)
         self.create_final_stack_check.setChecked(True)
-        stack_layout.addWidget(self.create_final_stack_check)
+        stacking_layout.addWidget(self.create_final_stack_check)
 
-        stack_group.setLayout(stack_layout)
-        processing_layout.addWidget(stack_group)
+        stacking_group.setLayout(stacking_layout)
+        processing_layout.addWidget(stacking_group)
 
         scroll_area.setWidget(scroll_content)
         processing_tab_outer.addWidget(scroll_area)
@@ -3424,6 +3433,7 @@ class PreprocessingInterface(QMainWindow):
 def main():
     try:
         app = QApplication(sys.argv)
+        qdarktheme.setup_theme()
         window = PreprocessingInterface()
         # Only show window if initialization was successful
         if window.initialization_successful:
