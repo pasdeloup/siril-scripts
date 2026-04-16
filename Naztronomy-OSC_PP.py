@@ -63,7 +63,8 @@ from pathlib import Path
 import shutil
 import sirilpy as s
 
-s.ensure_installed("PyQt6", "numpy", "astropy", "qt_themes")
+# Themes requirements: qt_themes, pyside6, qtpy
+s.ensure_installed("PyQt6", "numpy", "astropy", "qt_themes", "pyside6", "qtpy")
 
 
 from PyQt6.QtCore import Qt, QUrl
