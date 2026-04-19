@@ -628,10 +628,10 @@ class PreprocessingInterface(QMainWindow):
     def on_session_selected(self, index: int):
         if index < 0 or index >= len(self.sessions):
             return
-        # Only update if actually changing sessions
-        if self.chosen_session != self.sessions[index]:
-            self.chosen_session = self.get_session_by_index(index)
-            self.current_session = f"Session {index+1}"
+
+        self.chosen_session = self.get_session_by_index(index)
+        self.current_session = f"Session {index+1}"
+        if hasattr(self, "file_listbox"):
             self.refresh_file_list()
 
     def add_dropdown_session(self):
@@ -805,7 +805,9 @@ class PreprocessingInterface(QMainWindow):
 
     def refresh_file_list(self):
         self.file_listbox.clear()
-        self.siril.log(f"Switched to session {self.chosen_session}", LogColor.BLUE)
+        self.siril.log(
+            f"Switched to {self.session_dropdown.currentText()}", LogColor.BLUE
+        )
 
         # Update the session content group box title
         if hasattr(self, "session_content_group"):
