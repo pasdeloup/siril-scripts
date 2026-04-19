@@ -125,7 +125,7 @@ from typing import List, Dict
 
 APP_NAME = "Naztronomy - OSC Image Preprocessor"
 VERSION = "2.0.3"
-BUILD = "20260405"
+BUILD = "20260420"
 AUTHOR = "Nazmus Nasir"
 WEBSITE = "https://www.Naztronomy.com"
 YOUTUBE = "https://www.YouTube.com/Naztronomy"
