@@ -3049,6 +3049,28 @@ class PreprocessingInterface(QMainWindow):
         weighting_method: str = "Weighted FWHM",
         output_norm: bool = True,
     ):
+        # ── Pre-flight: check every session has at least 2 light frames ──────
+        problem_sessions = []
+        for i, session in enumerate(self.sessions):
+            if len(session.lights) == 0:
+                problem_sessions.append((i + 1, len(session.lights), "no lights"))
+            elif len(session.lights) == 1:
+                problem_sessions.append((i + 1, len(session.lights), "only 1 light"))
+
+        if problem_sessions:
+            lines = "".join(
+                f"• Session {n}: {reason} - at least 2 are required\n"
+                for n, _, reason in problem_sessions
+            )
+            QMessageBox.warning(
+                self,
+                "Not Enough Light Frames",
+                f"The following session(s) do not have enough light frames to stack:\n\n"
+                f"{lines}\n"
+                f"Each session needs at least 2 light frames.",
+            )
+            return
+
         self.siril.log(
             f"Running script version {VERSION} with arguments:\n"
             f"dark_flats={self.dark_flats_check.isChecked()}\n"
