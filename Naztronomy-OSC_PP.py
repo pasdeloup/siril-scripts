@@ -680,13 +680,252 @@ class PreprocessingInterface(QMainWindow):
         self.session_dropdown.clear()  # remove old items
         self.session_dropdown.addItems(session_names)  # add new items
 
+    def _scan_folder_for_sessions(self, folder: Path):
+        """Recursively scan `folder` for recognised frame-type subdirectories.
+
+        Recognised directories (lights/darks/flats/biases etc.) that contain
+        actual files are treated as leaf nodes — their files are collected and
+        the scanner does NOT descend into them further.
+
+        Recognised directories that contain NO direct files are treated as
+        passthrough containers and recursed into.  This handles structures like:
+
+            parent/lights/night_1/LIGHT/<files>
+            parent/lights/night_2/LIGHT/<files>
+
+        where `lights/` exists at an intermediate level.
+
+        Unrecognised directories are treated as potential session boundaries.
+
+        Returns:
+            ("single", {frame_type: [files]})           – one group found
+            ("multi",  {Path: {frame_type: [files]}})   – multiple groups found
+            ("none",   {})                              – nothing recognised found
+
+        Frame types prefixed with "_stacked_" come from *_stacked folder names.
+        """
+        _FT_MAP = {
+            "lights": "lights",
+            "light": "lights",
+            "darks": "darks",
+            "dark": "darks",
+            "flats": "flats",
+            "flat": "flats",
+            "biases": "biases",
+            "bias": "biases",
+            "dark flats": "biases",
+            "dark_flats": "biases",
+            "dark flat": "biases",
+            "dark_flat": "biases",
+        }
+        _ST_MAP = {
+            "darks_stacked": "darks",
+            "flats_stacked": "flats",
+            "biases_stacked": "biases",
+        }
+
+        def recurse(d: Path, group_key: Path | None) -> dict:
+            """Return {group_key_path: {frame_type: [files]}} for all discovered groups.
+
+            For each child directory of d:
+            - Recognised + has files  → leaf: collect files, stop descending into it
+            - Recognised + no files   → passthrough: recurse into it keeping group_key
+            - Unrecognised            → session boundary: recurse with child as new group_key
+            """
+            collected: dict[str, list[Path]] = {}  # frame-type matches at this level
+            sub_sessions: dict[Path, dict] = {}  # session groups from deeper recursion
+
+            for child in sorted(d.iterdir()):
+                if not child.is_dir():
+                    continue
+                child_key = child.name.lower()
+
+                if child_key in _FT_MAP or child_key in _ST_MAP:
+                    files = sorted(f for f in child.iterdir() if f.is_file())
+                    if files:
+                        # Leaf: recognised dir with direct files
+                        if child_key in _FT_MAP:
+                            collected.setdefault(_FT_MAP[child_key], []).extend(files)
+                        else:
+                            collected.setdefault(
+                                f"_stacked_{_ST_MAP[child_key]}", []
+                            ).extend(files)
+                    else:
+                        # Passthrough: recognised dir with no direct files — recurse keeping group_key
+                        for k, v in recurse(child, group_key).items():
+                            for ft, flist in v.items():
+                                sub_sessions.setdefault(k, {}).setdefault(
+                                    ft, []
+                                ).extend(flist)
+                else:
+                    # Unrecognised dir — potential session boundary
+                    new_group = child if group_key is None else group_key
+                    for k, v in recurse(child, new_group).items():
+                        for ft, flist in v.items():
+                            sub_sessions.setdefault(k, {}).setdefault(ft, []).extend(
+                                flist
+                            )
+
+            if collected:
+                gkey = group_key if group_key is not None else d
+                result = {gkey: collected}
+                for k, v in sub_sessions.items():
+                    result.setdefault(k, {}).update(
+                        {ft: flist for ft, flist in v.items()}
+                    )
+                return result
+
+            return sub_sessions
+
+        all_sessions = recurse(folder, None)
+        if not all_sessions:
+            return "none", {}
+        if len(all_sessions) == 1:
+            return "single", list(all_sessions.values())[0]
+        return "multi", all_sessions
+
+    def _handle_multi_session_drop(self, root_folder: Path | None, session_data: dict):
+        """Show a confirmation dialog then create new sessions from a multi-group folder drop.
+
+        root_folder is used for display only; pass None when data comes from
+        multiple dropped parent directories.
+        """
+        groups = sorted(session_data.keys(), key=lambda p: p.name)
+
+        # Determine if any two groups share the same final folder name.
+        # When they do, prepend the nearest non-recognised ancestor for disambiguation.
+        _RECOGNISED_NAMES = {
+            "lights",
+            "light",
+            "darks",
+            "dark",
+            "flats",
+            "flat",
+            "biases",
+            "bias",
+            "dark flats",
+            "dark_flats",
+            "dark flat",
+            "dark_flat",
+        }
+
+        def _ancestor_label(p: Path) -> str:
+            """Walk up past recognised intermediate dirs to find a meaningful ancestor name."""
+            candidate = p.parent
+            while candidate != candidate.parent:
+                if candidate.name.lower() not in _RECOGNISED_NAMES:
+                    return candidate.name
+                candidate = candidate.parent
+            return ""
+
+        group_names = [g.name for g in groups]
+        has_duplicates = len(group_names) != len(set(group_names))
+
+        def _display_label(g: Path) -> str:
+            if not has_duplicates:
+                return g.name
+            ancestor = _ancestor_label(g)
+            return f"{ancestor} / {g.name}" if ancestor else g.name
+
+        summary_parts = []
+        for g in groups:
+            parts = []
+            for ft, files in sorted(session_data[g].items()):
+                display = (
+                    (ft[len("_stacked_") :] + " (stacked)")
+                    if ft.startswith("_stacked_")
+                    else ft
+                )
+                parts.append(f"{display}: {len(files)}")
+            summary_parts.append(
+                f"<li><b>{_display_label(g)}</b> &mdash; {', '.join(parts)}</li>"
+            )
+
+        if root_folder is not None:
+            header = (
+                f"Found <b>{len(groups)}</b> session group(s) in "
+                f"<b>{root_folder.name}/</b>:<br>"
+            )
+        else:
+            header = f"Found <b>{len(groups)}</b> session group(s) across dropped folders:<br>"
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Multi-Session Folder Detected")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(
+            f"{header}"
+            f"<ul>{''.join(summary_parts)}</ul>"
+            f"Create <b>{len(groups)}</b> new session(s)?"
+        )
+        btn_create = msg.addButton(
+            f"Create {len(groups)} Session(s)", QMessageBox.ButtonRole.AcceptRole
+        )
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+
+        if msg.clickedButton() is not btn_create:
+            return
+
+        # If the current session is completely empty, reuse it for the first group
+        # instead of leaving it as a blank Session 1.
+        first_group, *rest_groups = groups
+        current_is_empty = (
+            not self.chosen_session.lights
+            and not self.chosen_session.darks
+            and not self.chosen_session.flats
+            and not self.chosen_session.biases
+        )
+
+        def _populate(session: Session, group_dir: Path):
+            for ft, ft_files in session_data[group_dir].items():
+                real_ft = ft[len("_stacked_") :] if ft.startswith("_stacked_") else ft
+                match real_ft:
+                    case "lights":
+                        session.lights.extend(ft_files)
+                    case "darks":
+                        session.darks.extend(ft_files)
+                    case "flats":
+                        session.flats.extend(ft_files)
+                    case "biases":
+                        session.biases.extend(ft_files)
+
+        if current_is_empty:
+            _populate(self.chosen_session, first_group)
+            self.siril.log(
+                f"> Loaded '{first_group.name}' into {self.session_dropdown.currentText()}",
+                LogColor.BLUE,
+            )
+            remaining = rest_groups
+        else:
+            remaining = groups
+
+        for group_dir in remaining:
+            new_session = Session()
+            self.sessions.append(new_session)
+            _populate(new_session, group_dir)
+            self.siril.log(
+                f"> Created Session {len(self.sessions)} from '{group_dir.name}'",
+                LogColor.BLUE,
+            )
+
+        self.update_dropdown()
+        new_idx = len(self.sessions) - 1
+        self.session_dropdown.setCurrentIndex(new_idx)
+        self.chosen_session = self.sessions[new_idx]
+        self.current_session = f"Session {new_idx + 1}"
+        self.update_process_separately_checkbox()
+
     def _handle_dropped_files(self, paths: list):
         """Called by DragDropListWidget when files or folders are dropped onto the list.
 
         Folders named lights/darks/flats/biases (or dark flats → biases) are
         recognised and their contents are added to the *current session* directly,
-        bypassing the frame-type dialog.  A parent folder containing those named
-        subfolders is also accepted.
+        bypassing the frame-type dialog.
+
+        A parent folder is scanned recursively (stopping at recognised directories)
+        to find frame-type subfolders.  If one group is found it is added to the
+        current session; if multiple groups are found the user is offered the option
+        to create a new session for each group.
 
         Individual files whose names contain _darks_stacked, _flats_stacked, or
         _biases_stacked are auto-categorised into their respective frame types.
@@ -697,11 +936,17 @@ class PreprocessingInterface(QMainWindow):
         """
         _FOLDER_TYPE_MAP = {
             "lights": "lights",
+            "light": "lights",
             "darks": "darks",
+            "dark": "darks",
             "flats": "flats",
+            "flat": "flats",
             "biases": "biases",
+            "bias": "biases",
             "dark flats": "biases",
             "dark_flats": "biases",
+            "dark flat": "biases",
+            "dark_flat": "biases",
         }
         _STACKED_FOLDER_MAP = {
             "darks_stacked": "darks",
@@ -717,6 +962,8 @@ class PreprocessingInterface(QMainWindow):
         folder_additions: dict[str, list[Path]] = {}
         # Stacked calibration folders → ask current vs all when >1 session
         stacked_additions: dict[str, list[Path]] = {}
+        # Accumulated multi-session groups from all scanned folders — one dialog at end
+        pending_multi_sessions: dict[Path, dict] = {}
 
         for folder in folders:
             folder = Path(folder)
@@ -726,41 +973,56 @@ class PreprocessingInterface(QMainWindow):
                 folder_files = sorted(f for f in folder.iterdir() if f.is_file())
                 if folder_files:
                     folder_additions.setdefault(frame_type, []).extend(folder_files)
+                else:
+                    # No direct files — the recognised folder may contain session subdirs
+                    mode, scan_data = self._scan_folder_for_sessions(folder)
+                    if mode == "single":
+                        for ft, ft_files in scan_data.items():
+                            if ft.startswith("_stacked_"):
+                                stacked_additions.setdefault(
+                                    ft[len("_stacked_") :], []
+                                ).extend(ft_files)
+                            else:
+                                folder_additions.setdefault(ft, []).extend(ft_files)
+                    elif mode == "multi":
+                        pending_multi_sessions.update(scan_data)
+                    else:
+                        self.siril.log(
+                            f"> Folder '{folder.name}' is empty and contains no recognised subfolders. Skipping.",
+                            LogColor.SALMON,
+                        )
             elif folder_key in _STACKED_FOLDER_MAP:
                 frame_type = _STACKED_FOLDER_MAP[folder_key]
                 folder_files = sorted(f for f in folder.iterdir() if f.is_file())
                 if folder_files:
                     stacked_additions.setdefault(frame_type, []).extend(folder_files)
             else:
-                # Treat as parent directory — look for recognised subfolders
-                found_any = False
-                for sub in sorted(folder.iterdir()):
-                    if not sub.is_dir():
-                        continue
-                    sub_key = sub.name.lower()
-                    if sub_key in _FOLDER_TYPE_MAP:
-                        frame_type = _FOLDER_TYPE_MAP[sub_key]
-                        sub_files = sorted(f for f in sub.iterdir() if f.is_file())
-                        if sub_files:
-                            folder_additions.setdefault(frame_type, []).extend(
-                                sub_files
-                            )
-                            found_any = True
-                    elif sub_key in _STACKED_FOLDER_MAP:
-                        frame_type = _STACKED_FOLDER_MAP[sub_key]
-                        sub_files = sorted(f for f in sub.iterdir() if f.is_file())
-                        if sub_files:
-                            stacked_additions.setdefault(frame_type, []).extend(
-                                sub_files
-                            )
-                            found_any = True
-                if not found_any:
+                # Scan recursively for recognised frame-type subdirectories
+                mode, scan_data = self._scan_folder_for_sessions(folder)
+                if mode == "none":
                     self.siril.log(
                         f"> Folder '{folder.name}' does not contain recognised "
-                        f"subfolders (lights, darks, flats, biases, dark flats, "
+                        f"subfolders (lights, darks, flats, biases, dark_flats, "
                         f"darks_stacked, flats_stacked, biases_stacked). Skipping.",
                         LogColor.SALMON,
                     )
+                elif mode == "single":
+                    # One group found — add to current session
+                    for ft, ft_files in scan_data.items():
+                        if ft.startswith("_stacked_"):
+                            stacked_additions.setdefault(
+                                ft[len("_stacked_") :], []
+                            ).extend(ft_files)
+                        else:
+                            folder_additions.setdefault(ft, []).extend(ft_files)
+                elif mode == "multi":
+                    # Accumulate — will show one combined dialog after the loop
+                    pending_multi_sessions.update(scan_data)
+
+        # Show a single combined dialog for all accumulated multi-session groups
+        if pending_multi_sessions:
+            root = None if len(folders) > 1 else Path(folders[0])
+            self._handle_multi_session_drop(root, pending_multi_sessions)
 
         # Apply regular folders → current session only
         for frame_type, folder_files in folder_additions.items():
@@ -1991,7 +2253,10 @@ class PreprocessingInterface(QMainWindow):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.file_listbox.setToolTip(
-            "Drag and drop files here to add them to the current session."
+            "Drag and drop files or folders here to add them to the current session.\n"
+            "Named folders (lights, darks, flats, biases) are auto-categorised.\n"
+            "Drop a parent folder containing those subfolders to load an entire session,\n"
+            "or a folder with session sub-folders to auto-create multiple sessions."
         )
         self.file_listbox.setItemDelegate(FileListDelegate(self.file_listbox))
         self.file_listbox.viewport().setMouseTracking(True)
