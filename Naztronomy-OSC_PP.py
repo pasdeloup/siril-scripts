@@ -29,7 +29,11 @@ allows you to choose files from any folder and drive and they will all be consol
 CHANGELOG:
 
 2.0.3 - Files tab UI overhaul
-      - Drag and drop files directly onto the file list
+      - Drag and drop files or folders directly onto the file list
+      - Folder drop: named folders (lights/darks/flats/biases/dark flats) auto-detected
+      - Folder drop: parent directory containing named subfolders also accepted
+      - Stacked calibration folders (darks_stacked, flats_stacked, biases_stacked) also accepted
+      - Stacked folder drop: prompts current vs all sessions when multiple sessions exist
       - Frame type selection dialog on drop (Lights, Darks, Flats, Biases)
       - Master calibration frame support via drag & drop (Master Dark, Master Flat, Master Bias)
       - Master frames can be applied to the current session, selected sessions (checkboxes), or all sessions
@@ -403,7 +407,7 @@ class DragDropListWidget(QListWidget):
             painter.drawText(
                 self.viewport().rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "Drop files here\nor use the Add buttons above",
+                "Drop files or folders here\nor use the Add buttons above",
             )
             painter.restore()
 
@@ -666,59 +670,283 @@ class PreprocessingInterface(QMainWindow):
         self.session_dropdown.addItems(session_names)  # add new items
 
     def _handle_dropped_files(self, paths: list):
-        """Called by DragDropListWidget when files are dropped onto the list."""
-        dlg = FileTypeDialog(
-            file_count=len(paths),
-            current_session_name=self.session_dropdown.currentText(),
-            all_session_names=[f"Session {i+1}" for i in range(len(self.sessions))],
-            current_session_index=self.session_dropdown.currentIndex(),
-            parent=self,
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.chosen_type is None:
-            return
-        filetype = dlg.chosen_type
-        scope = dlg.chosen_scope
+        """Called by DragDropListWidget when files or folders are dropped onto the list.
 
-        # Determine which sessions to apply to
-        if scope == "all":
-            target_sessions = self.sessions
-        elif scope == "selected":
-            target_sessions = [self.sessions[i] for i in dlg.chosen_session_indices]
-        else:
-            target_sessions = [self.chosen_session]
+        Folders named lights/darks/flats/biases (or dark flats → biases) are
+        recognised and their contents are added to the *current session* directly,
+        bypassing the frame-type dialog.  A parent folder containing those named
+        subfolders is also accepted.
 
-        # Map master types to their underlying calibration list
-        _master_map = {
-            "master dark": "darks",
-            "master flat": "flats",
-            "master bias": "biases",
+        Individual files whose names contain _darks_stacked, _flats_stacked, or
+        _biases_stacked are auto-categorised into their respective frame types.
+        When more than one session exists the user is asked whether to apply them
+        to the current session only or to all sessions.
+
+        All other plain files still trigger the frame-type dialog.
+        """
+        _FOLDER_TYPE_MAP = {
+            "lights": "lights",
+            "darks": "darks",
+            "flats": "flats",
+            "biases": "biases",
+            "dark flats": "biases",
+            "dark_flats": "biases",
         }
-        resolved_type = _master_map.get(filetype.lower(), filetype.lower())
+        _STACKED_FOLDER_MAP = {
+            "darks_stacked": "darks",
+            "flats_stacked": "flats",
+            "biases_stacked": "biases",
+        }
 
-        for session in target_sessions:
-            match resolved_type:
+        folders = [p for p in paths if Path(p).is_dir()]
+        files = [p for p in paths if Path(p).is_file()]
+
+        # ── Process folders ──────────────────────────────────────────────────
+        # Regular named folders → always current session
+        folder_additions: dict[str, list[Path]] = {}
+        # Stacked calibration folders → ask current vs all when >1 session
+        stacked_additions: dict[str, list[Path]] = {}
+
+        for folder in folders:
+            folder = Path(folder)
+            folder_key = folder.name.lower()
+            if folder_key in _FOLDER_TYPE_MAP:
+                frame_type = _FOLDER_TYPE_MAP[folder_key]
+                folder_files = sorted(f for f in folder.iterdir() if f.is_file())
+                if folder_files:
+                    folder_additions.setdefault(frame_type, []).extend(folder_files)
+            elif folder_key in _STACKED_FOLDER_MAP:
+                frame_type = _STACKED_FOLDER_MAP[folder_key]
+                folder_files = sorted(f for f in folder.iterdir() if f.is_file())
+                if folder_files:
+                    stacked_additions.setdefault(frame_type, []).extend(folder_files)
+            else:
+                # Treat as parent directory — look for recognised subfolders
+                found_any = False
+                for sub in sorted(folder.iterdir()):
+                    if not sub.is_dir():
+                        continue
+                    sub_key = sub.name.lower()
+                    if sub_key in _FOLDER_TYPE_MAP:
+                        frame_type = _FOLDER_TYPE_MAP[sub_key]
+                        sub_files = sorted(f for f in sub.iterdir() if f.is_file())
+                        if sub_files:
+                            folder_additions.setdefault(frame_type, []).extend(
+                                sub_files
+                            )
+                            found_any = True
+                    elif sub_key in _STACKED_FOLDER_MAP:
+                        frame_type = _STACKED_FOLDER_MAP[sub_key]
+                        sub_files = sorted(f for f in sub.iterdir() if f.is_file())
+                        if sub_files:
+                            stacked_additions.setdefault(frame_type, []).extend(
+                                sub_files
+                            )
+                            found_any = True
+                if not found_any:
+                    self.siril.log(
+                        f"> Folder '{folder.name}' does not contain recognised "
+                        f"subfolders (lights, darks, flats, biases, dark flats, "
+                        f"darks_stacked, flats_stacked, biases_stacked). Skipping.",
+                        LogColor.SALMON,
+                    )
+
+        # Apply regular folders → current session only
+        for frame_type, folder_files in folder_additions.items():
+            match frame_type:
                 case "lights":
-                    session.lights.extend(paths)
+                    self.chosen_session.lights.extend(folder_files)
                 case "darks":
-                    session.darks.extend(paths)
+                    self.chosen_session.darks.extend(folder_files)
                 case "flats":
-                    session.flats.extend(paths)
+                    self.chosen_session.flats.extend(folder_files)
                 case "biases":
-                    session.biases.extend(paths)
-
-        if scope == "all":
-            session_label = "all sessions"
-        elif scope == "selected":
-            session_label = ", ".join(
-                f"Session {i+1}" for i in dlg.chosen_session_indices
+                    self.chosen_session.biases.extend(folder_files)
+            self.siril.log(
+                f"> Added {len(folder_files)} {frame_type} files to "
+                f"{self.session_dropdown.currentText()} (folder drop)",
+                LogColor.BLUE,
             )
-        else:
-            session_label = self.session_dropdown.currentText()
 
-        self.siril.log(
-            f"> Added {len(paths)} {filetype} files to {session_label} (drag & drop)",
-            LogColor.BLUE,
-        )
+        # Apply stacked calibration folders → ask session scope if >1 session
+        if stacked_additions:
+            if len(self.sessions) > 1:
+                stacked_names = ", ".join(f"{ft}_stacked" for ft in stacked_additions)
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Apply Stacked Calibration Frames")
+                msg.setText(
+                    f"You dropped stacked calibration folder(s):\n<b>{stacked_names}</b>\n\n"
+                    f"Apply to which sessions?"
+                )
+                msg.setTextFormat(Qt.TextFormat.RichText)
+                btn_current = msg.addButton(
+                    f"Current Session ({self.session_dropdown.currentText()})",
+                    QMessageBox.ButtonRole.AcceptRole,
+                )
+                btn_all = msg.addButton(
+                    "All Sessions", QMessageBox.ButtonRole.ActionRole
+                )
+                msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                msg.exec()
+                clicked = msg.clickedButton()
+                if clicked is btn_all:
+                    stacked_target_sessions = self.sessions
+                    stacked_session_label = "all sessions"
+                elif clicked is btn_current:
+                    stacked_target_sessions = [self.chosen_session]
+                    stacked_session_label = self.session_dropdown.currentText()
+                else:
+                    stacked_target_sessions = []
+                    stacked_session_label = ""
+            else:
+                stacked_target_sessions = [self.chosen_session]
+                stacked_session_label = self.session_dropdown.currentText()
+
+            for frame_type, stacked_files in stacked_additions.items():
+                for session in stacked_target_sessions:
+                    match frame_type:
+                        case "darks":
+                            session.darks.extend(stacked_files)
+                        case "flats":
+                            session.flats.extend(stacked_files)
+                        case "biases":
+                            session.biases.extend(stacked_files)
+                if stacked_target_sessions:
+                    self.siril.log(
+                        f"> Added {len(stacked_files)} {frame_type} (stacked) files to "
+                        f"{stacked_session_label} (folder drop)",
+                        LogColor.BLUE,
+                    )
+
+        # ── Process plain files ──────────────────────────────────────────────
+        # First, pull out any stacked calibration files identified by filename pattern.
+        # e.g. session1_240s_2024-12-03_darks_stacked.fit → darks
+        _STACKED_FILE_SUFFIXES = {
+            "_darks_stacked": "darks",
+            "_flats_stacked": "flats",
+            "_biases_stacked": "biases",
+        }
+
+        stacked_files: dict[str, list[Path]] = {}
+        regular_files: list[Path] = []
+        for f in files:
+            stem = Path(f).stem.lower()
+            matched = False
+            for suffix, frame_type in _STACKED_FILE_SUFFIXES.items():
+                if suffix in stem:
+                    stacked_files.setdefault(frame_type, []).append(Path(f))
+                    matched = True
+                    break
+            if not matched:
+                regular_files.append(Path(f))
+
+        # Apply stacked calibration files → ask session scope if >1 session
+        if stacked_files:
+            if len(self.sessions) > 1:
+                stacked_names = ", ".join(f"{ft}_stacked" for ft in stacked_files)
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Apply Stacked Calibration Frames")
+                msg.setText(
+                    f"You dropped stacked/master calibration file(s):\n<b>{stacked_names}</b>\n\n"
+                    f"Apply to which sessions?"
+                )
+                msg.setTextFormat(Qt.TextFormat.RichText)
+                btn_current = msg.addButton(
+                    f"Current Session ({self.session_dropdown.currentText()})",
+                    QMessageBox.ButtonRole.AcceptRole,
+                )
+                btn_all = msg.addButton(
+                    "All Sessions", QMessageBox.ButtonRole.ActionRole
+                )
+                msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                msg.exec()
+                clicked = msg.clickedButton()
+                if clicked is btn_all:
+                    stacked_file_sessions = self.sessions
+                    stacked_file_label = "all sessions"
+                elif clicked is btn_current:
+                    stacked_file_sessions = [self.chosen_session]
+                    stacked_file_label = self.session_dropdown.currentText()
+                else:
+                    stacked_file_sessions = []
+                    stacked_file_label = ""
+            else:
+                stacked_file_sessions = [self.chosen_session]
+                stacked_file_label = self.session_dropdown.currentText()
+
+            for frame_type, sf_list in stacked_files.items():
+                for session in stacked_file_sessions:
+                    match frame_type:
+                        case "darks":
+                            session.darks.extend(sf_list)
+                        case "flats":
+                            session.flats.extend(sf_list)
+                        case "biases":
+                            session.biases.extend(sf_list)
+                if stacked_file_sessions:
+                    self.siril.log(
+                        f"> Added {len(sf_list)} {frame_type} (stacked) file(s) to "
+                        f"{stacked_file_label} (drag & drop)",
+                        LogColor.BLUE,
+                    )
+
+        # Remaining non-stacked files → show frame-type dialog as before
+        if regular_files:
+            dlg = FileTypeDialog(
+                file_count=len(regular_files),
+                current_session_name=self.session_dropdown.currentText(),
+                all_session_names=[f"Session {i+1}" for i in range(len(self.sessions))],
+                current_session_index=self.session_dropdown.currentIndex(),
+                parent=self,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted or dlg.chosen_type is None:
+                if folder_additions or stacked_additions or stacked_files:
+                    self.refresh_file_list()
+                return
+            filetype = dlg.chosen_type
+            scope = dlg.chosen_scope
+
+            # Determine which sessions to apply to
+            if scope == "all":
+                target_sessions = self.sessions
+            elif scope == "selected":
+                target_sessions = [self.sessions[i] for i in dlg.chosen_session_indices]
+            else:
+                target_sessions = [self.chosen_session]
+
+            # Map master types to their underlying calibration list
+            _master_map = {
+                "master dark": "darks",
+                "master flat": "flats",
+                "master bias": "biases",
+            }
+            resolved_type = _master_map.get(filetype.lower(), filetype.lower())
+
+            for session in target_sessions:
+                match resolved_type:
+                    case "lights":
+                        session.lights.extend(regular_files)
+                    case "darks":
+                        session.darks.extend(regular_files)
+                    case "flats":
+                        session.flats.extend(regular_files)
+                    case "biases":
+                        session.biases.extend(regular_files)
+
+            if scope == "all":
+                session_label = "all sessions"
+            elif scope == "selected":
+                session_label = ", ".join(
+                    f"Session {i+1}" for i in dlg.chosen_session_indices
+                )
+            else:
+                session_label = self.session_dropdown.currentText()
+
+            self.siril.log(
+                f"> Added {len(regular_files)} {filetype} files to {session_label} (drag & drop)",
+                LogColor.BLUE,
+            )
+
         self.refresh_file_list()
 
     def load_files(self, filetype: str):
@@ -1523,8 +1751,7 @@ class PreprocessingInterface(QMainWindow):
         browser.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        browser.setHtml(
-            """
+        browser.setHtml("""
             <style>
             body  { font-family: sans-serif; font-size: 13px; margin: 4px; }
             h3    { margin-bottom: 4px; margin-top: 14px; color: #2c7bb6; }
@@ -1552,6 +1779,25 @@ class PreprocessingInterface(QMainWindow):
             <li>Calibration cannot be shared between sessions (yet).</li>
             <li>Preprocessed lights are saved to a <b>collected_lights/</b> directory when
                 <i>Save Calibrated Lights</i> is enabled.</li>
+            </ul>
+
+            <h3>Drag &amp; Drop</h3>
+            <ul>
+            <li>You can drag and drop <b>files or folders</b> directly onto the file list.</li>
+            <li><b>Named folders</b> (<code>lights</code>, <code>darks</code>, <code>flats</code>,
+                <code>biases</code>, <code>dark_flats</code>) are recognised automatically — their
+                contents are added to the <b>current session</b> with no dialog.</li>
+            <li>Drop a <b>parent folder</b> that contains those named subfolders and each subfolder
+                is scanned and categorised the same way.</li>
+            <li><b>Stacked calibration files</b> whose filenames contain <code>_darks_stacked</code>,
+                <code>_flats_stacked</code>, or <code>_biases_stacked</code> are auto-categorised
+                into their respective frame type. When more than one session exists you will be
+                asked whether to apply them to the <i>current session</i> or <i>all sessions</i>.</li>
+            <li>Any other dropped files trigger the normal <b>frame-type dialog</b> where you
+                choose Lights, Darks, Flats, Biases, or a Master calibration type and the target
+                session scope.</li>
+            <li>You can mix files and folders in a single drop - each group is handled
+                independently.</li>
             </ul>
 
             <h3>Presets</h3>
@@ -1591,8 +1837,7 @@ class PreprocessingInterface(QMainWindow):
             <li>When <i>Save Calibrated Lights</i> is <b>on</b>, all calibrated lights are
                 collected and stacked together in one pass.</li>
             </ul>
-            """
-        )
+            """)
         outer.addWidget(browser)
 
         # Social / community buttons
