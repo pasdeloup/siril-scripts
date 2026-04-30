@@ -387,11 +387,22 @@ class DragDropListWidget(QListWidget):
         " background-color: rgba(37, 99, 235, 0.07); }"
     )
 
-    def __init__(self, on_drop_callback, parent=None):
+    def __init__(self, on_drop_callback, on_delete_callback=None, parent=None):
         super().__init__(parent)
         self._on_drop = on_drop_callback
+        self._on_delete = on_delete_callback
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+
+    def keyPressEvent(self, event):
+        if (
+            self._on_delete is not None
+            and self.selectedItems()
+            and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+        ):
+            self._on_delete()
+        else:
+            super().keyPressEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1973,7 +1984,8 @@ class PreprocessingInterface(QMainWindow):
 
         # Files list
         self.file_listbox = DragDropListWidget(
-            on_drop_callback=self._handle_dropped_files
+            on_drop_callback=self._handle_dropped_files,
+            on_delete_callback=self.remove_selected_files,
         )
         self.file_listbox.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
@@ -1988,6 +2000,10 @@ class PreprocessingInterface(QMainWindow):
         file_buttons = QHBoxLayout()
         remove_btn = QPushButton("Remove Selected File(s)")
         remove_btn.clicked.connect(self.remove_selected_files)
+        remove_btn.setToolTip(
+            "Remove the selected file(s) from this session.\n"
+            "Tip: You can also press Delete or Backspace while a file(s) is highlighted."
+        )
         reset_btn = QPushButton("Reset Everything")
         reset_btn.clicked.connect(self.reset_everything)
         reset_btn.setToolTip("Warning: This will remove all sessions and files!")
