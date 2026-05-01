@@ -147,6 +147,14 @@ UI_DEFAULTS = {
     "drizzle_amount": 1.0,
     "pixel_fraction": 1.0,
 }
+
+# Controls how files are staged into the sessions/ folder before processing.
+# False (default): symlink files on the same drive, copy files from a different drive.
+#   Cross-drive symlinks cause Siril/libraw to read through untrusted mounts and
+#   fail with I/O errors (WinError 448), so they are always copied.
+# True: always symlink regardless of drive. Use only if your OS / mount allows it
+#   and you want to avoid the disk copy (e.g. large raw files on a trusted NAS).
+ALWAYS_SYMLINK: bool = False
 FRAME_TYPES = ("lights", "darks", "flats", "biases")
 
 
@@ -964,6 +972,8 @@ class PreprocessingInterface(QMainWindow):
         stacked_additions: dict[str, list[Path]] = {}
         # Accumulated multi-session groups from all scanned folders — one dialog at end
         pending_multi_sessions: dict[Path, dict] = {}
+        # "single" scan results keyed by the dropped folder — resolved after the loop
+        pending_single_sessions: dict[Path, dict] = {}
 
         for folder in folders:
             folder = Path(folder)
@@ -977,13 +987,7 @@ class PreprocessingInterface(QMainWindow):
                     # No direct files — the recognised folder may contain session subdirs
                     mode, scan_data = self._scan_folder_for_sessions(folder)
                     if mode == "single":
-                        for ft, ft_files in scan_data.items():
-                            if ft.startswith("_stacked_"):
-                                stacked_additions.setdefault(
-                                    ft[len("_stacked_") :], []
-                                ).extend(ft_files)
-                            else:
-                                folder_additions.setdefault(ft, []).extend(ft_files)
+                        pending_single_sessions[folder] = scan_data
                     elif mode == "multi":
                         pending_multi_sessions.update(scan_data)
                     else:
@@ -1007,17 +1011,26 @@ class PreprocessingInterface(QMainWindow):
                         LogColor.SALMON,
                     )
                 elif mode == "single":
-                    # One group found — add to current session
-                    for ft, ft_files in scan_data.items():
-                        if ft.startswith("_stacked_"):
-                            stacked_additions.setdefault(
-                                ft[len("_stacked_") :], []
-                            ).extend(ft_files)
-                        else:
-                            folder_additions.setdefault(ft, []).extend(ft_files)
+                    # Track per-folder — resolved after the loop
+                    pending_single_sessions[folder] = scan_data
                 elif mode == "multi":
                     # Accumulate — will show one combined dialog after the loop
                     pending_multi_sessions.update(scan_data)
+
+        # Resolve pending "single" scan results:
+        # - Exactly one, no multi pending → add directly to the current session
+        # - More than one, or mixed with multi → treat each folder as its own session
+        if len(pending_single_sessions) == 1 and not pending_multi_sessions:
+            for ft_map in pending_single_sessions.values():
+                for ft, ft_files in ft_map.items():
+                    if ft.startswith("_stacked_"):
+                        stacked_additions.setdefault(ft[len("_stacked_"):], []).extend(ft_files)
+                    else:
+                        folder_additions.setdefault(ft, []).extend(ft_files)
+        elif pending_single_sessions:
+            # Multiple single-session folders dropped — promote each to its own session group
+            for src_folder, ft_map in pending_single_sessions.items():
+                pending_multi_sessions[src_folder] = ft_map
 
         # Show a single combined dialog for all accumulated multi-session groups
         if pending_multi_sessions:
@@ -1273,24 +1286,26 @@ class PreprocessingInterface(QMainWindow):
                 files = session.get_files_by_type(image_type)
                 for file in files:
                     dest_path = session_dir / image_type / file.name
+                    src = Path(file)
 
-                    try:
-                        # Convert to absolute paths for reliable symlinks
-                        src_abs = Path(file).resolve()
-                        dest_abs = dest_path.resolve()
+                    # If source and destination are on different drives, always copy.
+                    # Symlinking across drives (e.g. M:\ → H:\) causes Siril/libraw to
+                    # resolve the symlink back to the original path and read from the
+                    # untrusted mount, producing "Error in libraw Input/output error".
+                    src_drive = src.resolve(strict=False).drive.lower()
+                    dst_drive = dest_path.resolve(strict=False).drive.lower()
+                    same_drive = src_drive == dst_drive
 
-                        # Attempt to create symlink
-                        os.symlink(src_abs, dest_abs)
-                        self.siril.log(
-                            f"Symlinked {file} to {dest_path}", LogColor.BLUE
-                        )
+                    if ALWAYS_SYMLINK or same_drive:
+                        try:
+                            os.symlink(src.resolve(strict=False), dest_path.resolve(strict=False))
+                            self.siril.log(f"Symlinked {file} to {dest_path}", LogColor.BLUE)
+                            continue
+                        except (OSError, NotImplementedError):
+                            pass  # fall through to copy
 
-                    except (OSError, NotImplementedError):
-                        # Fall back to copying if symlink fails
-                        # OSError covers permission issues and unsupported filesystems
-                        # NotImplementedError covers platforms that don't support symlinks
-                        shutil.copy(file, dest_path)
-                        self.siril.log(f"Copied {file} to {dest_path}", LogColor.BLUE)
+                    shutil.copy(str(src), str(dest_path))
+                    self.siril.log(f"Copied {file} to {dest_path}", LogColor.BLUE)
             else:
                 self.siril.log(
                     f"Skipping {image_type}: no files found", LogColor.SALMON
@@ -1420,12 +1435,17 @@ class PreprocessingInterface(QMainWindow):
         if os.path.isdir(directory):
             print(f"Found directory for {image_type}: {directory}")
             self.siril.cmd("cd", f'"{directory}"')
-            # Ignore hidden files and dirs
+            # Ignore hidden files and dirs.
+            # Also accept symlinks: os.path.isfile() silently returns False for
+            # symlinks whose targets live on an untrusted mount (WinError 448).
+            def _is_file_or_link(p):
+                return os.path.islink(p) or (os.path.isfile(p) and not os.path.isdir(p))
+
             file_count = len(
                 [
                     name
                     for name in os.listdir(directory)
-                    if os.path.isfile(os.path.join(directory, name))
+                    if _is_file_or_link(os.path.join(directory, name))
                     and not name.startswith(".")
                 ]
             )
@@ -1443,7 +1463,7 @@ class PreprocessingInterface(QMainWindow):
                 first_file = next(
                     name
                     for name in os.listdir(directory)
-                    if os.path.isfile(os.path.join(directory, name))
+                    if _is_file_or_link(os.path.join(directory, name))
                     and not name.startswith(".")
                 )
                 src = os.path.join(directory, first_file)
@@ -1468,7 +1488,7 @@ class PreprocessingInterface(QMainWindow):
                     first_file = next(
                         name
                         for name in os.listdir(directory)
-                        if os.path.isfile(os.path.join(directory, name))
+                        if _is_file_or_link(os.path.join(directory, name))
                         and not name.startswith(".")
                     )
                     file_ext = os.path.splitext(first_file)[1].lower()
@@ -1969,6 +1989,8 @@ class PreprocessingInterface(QMainWindow):
             process_dir = os.path.join(self.current_working_directory, "process")
         else:
             process_dir = self.current_working_directory
+        if not os.path.isdir(process_dir):
+            return
         for f in os.listdir(process_dir):
             # Skip the stacked file
             name, ext = os.path.splitext(f.lower())
@@ -3222,7 +3244,7 @@ class PreprocessingInterface(QMainWindow):
             current_dir = os.path.join(self.current_working_directory, "process")
 
             # Only save calibrated lights if requested
-            if save_calibrated_lights:
+            if save_calibrated_lights and os.path.isdir(current_dir):
                 # Mitigate bug: If collected_lights doesn't exist, create it here because sometimes it doesn't get created earlier
                 os.makedirs(self.collected_lights_dir, exist_ok=True)
                 # Find and move all files starting with 'pp_lights'
