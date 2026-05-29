@@ -29,7 +29,7 @@ A comprehensive Python script that automates the preprocessing workflow for smar
 - Spectrophotometric Color Calibration (SPCC) for supported telescopes
 - Save/Load presets functionality
 
-**Demo Video:** [YouTube - Smart Telescope Processing](https://www.youtube.com/watch?v=0RqvX9cR8Eg)
+**Demo Video:** [YouTube - Smart Telescope Processing](https://www.youtube.com/watch?v=QRZ5mS79fGQ)
 
 #### Usage Guidelines
 
@@ -58,7 +58,7 @@ An advanced OSC (One Shot Color) image preprocessing script designed for process
 - Experimental mono camera support (no debayering)
 - Comprehensive filter settings for image quality control
 
-**Demo Video:** [YouTube - OSC Image Processing](https://www.youtube.com/watch?v=WjabF-bVBmU)
+**Demo Video:** [YouTube - OSC Image Processing](https://www.youtube.com/watch?v=prU1w4W5IbE)
 
 #### Usage Guidelines
 
@@ -100,6 +100,15 @@ Two ways to install these scripts:
 - **Bluesky** - [Bluesky/Naztronomy.com](https://bsky.app/profile/naztronomy.com)
 - **Instagram** - [IG/Naztronomy](https://instagram.com/naztronomy)
 
+## Support the Project
+
+If these scripts have been useful to you, consider supporting the project — it helps fund continued development and new features:
+
+- **Patreon** — [patreon.com/c/naztronomy](https://www.patreon.com/c/naztronomy)
+- **Buy Me a Coffee** — [buymeacoffee.com/naztronomy](https://www.buymeacoffee.com/naztronomy)
+- **YouTube Memberships** — [youtube.com/naztronomy/join](https://www.youtube.com/naztronomy/join)
+- **GitHub Sponsors** — [github.com/sponsors/naztronomy](https://github.com/sponsors/naztronaut)
+
 ## License
 
 This project is licensed under the SPDX-License-Identifier: GPL-3.0-or-later- see the [LICENSE](LICENSE) file for details
@@ -115,13 +124,13 @@ Have questions? You can reach out through several channels:
 
 ## Contributing
 
-Pull requests are welcome! Please ensure you:
+Pull requests are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines. Key points:
 
-- Test your changes thoroughly
-- Follow the existing code style
-- Update documentation as needed
-
-Bug fixes and new features will be reviewed before merging.
+- **All pull requests must target the `develop` branch** — do not open PRs against `main` directly
+- **New features must be non-breaking** — all existing functionality must continue to work as expected
+- Test your changes thoroughly before submitting
+- Follow the existing code style and update documentation as needed
+- Bug fixes and new features will be reviewed before merging
 
 ## Deprecated Scripts (.ssf files)
 
