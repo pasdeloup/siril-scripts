@@ -319,41 +319,7 @@ class PreprocessingInterface(QMainWindow):
 
         self.initial_message()
 
-        changed_cwd = False  # a way not to run the prompting loop
-        initial_cwd = os.path.join(self.current_working_directory, "lights")
-        if os.path.isdir(initial_cwd):
-            self.siril.log(
-                f"Current working directory is valid: {self.current_working_directory}",
-                LogColor.GREEN,
-            )
-            self.siril.cmd("cd", f'"{self.current_working_directory}"')
-            self.cwd_label_text = (
-                f"Current working directory: {self.current_working_directory}"
-            )
-            changed_cwd = True
-        elif os.path.basename(self.current_working_directory.lower()) == "lights":
-            msg = "You're currently in the 'lights' directory, do you want to select the parent directory?"
-            answer = QMessageBox.question(self, "Already in Lights Dir", msg)
-            if answer == QMessageBox.StandardButton.Yes:
-                self.siril.cmd("cd", "../")
-                os.chdir(os.path.dirname(self.current_working_directory))
-                self.current_working_directory = os.path.dirname(
-                    self.current_working_directory
-                )
-                self.cwd_label_text = (
-                    f"Current working directory: {self.current_working_directory}"
-                )
-                self.siril.log(
-                    f"Updated current working directory to: {self.current_working_directory}",
-                    LogColor.GREEN,
-                )
-                changed_cwd = True
-            else:
-                self.siril.log(
-                    f"Current working directory is invalid: {self.current_working_directory}, reprompting...",
-                    LogColor.SALMON,
-                )
-                changed_cwd = False
+        changed_cwd = self.check_directory(self.current_working_directory, True)  # a way not to run the prompting loop
 
         if not changed_cwd:
             while True:
@@ -377,44 +343,9 @@ class PreprocessingInterface(QMainWindow):
                     self.close()
                     return  # Stop initialization completely
 
-                lights_directory = os.path.join(selected_dir, "lights")
-                if os.path.isdir(lights_directory):
-                    self.siril.cmd("cd", f'"{selected_dir}"')
-                    os.chdir(selected_dir)
-                    self.current_working_directory = selected_dir
-                    self.cwd_label_text = f"Current working directory: {selected_dir}"
-                    self.siril.log(
-                        f"Updated current working directory to: {selected_dir}",
-                        LogColor.GREEN,
-                    )
+                if self.check_directory(selected_dir):
                     break
 
-                elif os.path.basename(selected_dir.lower()) == "lights":
-                    msg = "The selected directory is the 'lights' directory, do you want to select the parent directory?"
-                    answer = QMessageBox.question(
-                        self,
-                        "Already in Lights Dir",
-                        msg,
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    )
-                    if answer == QMessageBox.StandardButton.Yes:
-                        parent_dir = os.path.dirname(selected_dir)
-                        self.siril.cmd("cd", f'"{parent_dir}"')
-                        os.chdir(parent_dir)
-                        self.current_working_directory = parent_dir
-                        self.cwd_label_text = f"Current working directory: {parent_dir}"
-                        self.siril.log(
-                            f"Updated current working directory to: {parent_dir}",
-                            LogColor.GREEN,
-                        )
-                    break
-                else:
-                    msg = f"The selected directory must contain a subdirectory named 'lights'.\nYou selected: {selected_dir}. Please try again."
-                    self.siril.log(msg, LogColor.SALMON)
-                    QMessageBox.critical(
-                        self, "Invalid Directory", msg, QMessageBox.StandardButton.Ok
-                    )
-                    continue
         self.create_widgets()
         # Initialize fits_files_count before creating widgets
         self.fits_files_count = 0
@@ -422,6 +353,54 @@ class PreprocessingInterface(QMainWindow):
 
         # self.setup_shortcuts()
         self.initialization_successful = True
+
+    def confirm_selected_directory(self, directory: str):
+        self.siril.cmd("cd", f'"{directory}"')
+        os.chdir(directory)
+        self.current_working_directory = directory
+        self.cwd_label_text = f"Current working directory: {directory}"
+        if (directory == self.current_working_directory):
+            self.siril.log(
+                f"Current working directory is valid: {self.current_working_directory}",
+                LogColor.GREEN,
+            )
+        else:
+            self.siril.log(
+                f"Updated current working directory to: {directory}",
+                LogColor.GREEN,
+            )
+
+    def check_directory(self, directory: str, is_initial_dir=False) -> bool: 
+        lights_directory = os.path.join(directory, "lights")
+        if os.path.isdir(lights_directory):
+            self.confirm_selected_directory(directory)
+            return True
+
+        elif os.path.basename(directory.lower()) == "lights":
+            msg = "The selected directory is the 'lights' directory, do you want to select the parent directory?"
+            answer = QMessageBox.question(
+                self,
+                "Already in Lights Dir",
+                msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                parent_dir = os.path.dirname(directory)
+                self.confirm_selected_directory(parent_dir)
+            return True
+        elif is_initial_dir:
+            self.siril.log(
+                f"Current working directory is invalid: {directory}, reprompting...",
+                LogColor.SALMON,
+            )
+            return False
+        else: 
+            msg = f"The selected directory must contain a subdirectory named 'lights'.\nYou selected: {directory}. Please try again."
+            self.siril.log(msg, LogColor.SALMON)
+            QMessageBox.critical(
+                self, "Invalid Directory", msg, QMessageBox.StandardButton.Ok
+            )
+            return False
 
     def initial_message(self):
         msg = f"""Welcome to {APP_NAME} v{VERSION}!
