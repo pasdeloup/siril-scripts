@@ -271,6 +271,7 @@ class PreprocessingInterface(QMainWindow):
         self.target_coords = None
         self.telescope_combo = None
         self.filter_combo = None
+        self.dwarf = None
 
         self.filter_options_map = FILTER_OPTIONS_MAP
         self.current_filter_options = self.filter_options_map["ZWO Seestar S50"]
@@ -358,12 +359,11 @@ class PreprocessingInterface(QMainWindow):
                     LogColor.SALMON,
                 )
                 changed_cwd = False
-        elif os.path.exists(os.path.join(self.current_working_directory, "shotsInfo.json")):
+        elif self.load_dwarf(self.current_working_directory):
             msg = "You don't have 'lights' directory, but I've found a shotsinfo.json so you may be using a DWARF Telescope, do you want me to try to create the 'lights' directory for you and put your fits files in it?"
             answer = QMessageBox.question(self, "Copy Dwarf fits into Lights Dir", msg)
-            if answer == QMessageBox.StandardButton.Yes:
-                dwarf = DwarfUtils(self.current_working_directory, self.siril)
-                dwarf.create_lights_folder()
+            if answer == QMessageBox.StandardButton.Yes:                
+                self.dwarf.create_lights_folder()
                 changed_cwd = True
             else:
                 self.siril.log(
@@ -426,12 +426,11 @@ class PreprocessingInterface(QMainWindow):
                         )
                     break
 
-                elif os.path.exists(os.path.join(selected_dir, "shotsInfo.json")):
+                elif self.load_dwarf(selected_dir):
                     msg = "You don't have 'lights' directory, but I've found a shotsinfo.json so you may be using a DWARF Telescope, do you want me to try to create the 'lights' directory for you and put your fits files in it?"
                     answer = QMessageBox.question(self, "Copy Dwarf fits into Lights Dir", msg)
-                    if answer == QMessageBox.StandardButton.Yes:
-                        dwarf = DwarfUtils(selected_dir, self.siril)
-                        dwarf.create_lights_folder()                        
+                    if answer == QMessageBox.StandardButton.Yes:                        
+                        self.dwarf.create_lights_folder()                        
                         self.siril.cmd("cd", f'"{selected_dir}"')
                         os.chdir(selected_dir)
                         self.current_working_directory = selected_dir
@@ -449,7 +448,11 @@ class PreprocessingInterface(QMainWindow):
                         self, "Invalid Directory", msg, QMessageBox.StandardButton.Ok
                     )
                     continue
+        # (Re)Load Dwarf info if available
+        self.load_dwarf(self.current_working_directory)
+
         self.create_widgets()
+
         # Initialize fits_files_count before creating widgets
         self.fits_files_count = 0
         self.set_telescope_from_fits()
@@ -1367,6 +1370,15 @@ class PreprocessingInterface(QMainWindow):
         # Set default selection
         if new_options:
             self.filter_combo.setCurrentText(new_options[0])
+
+        if selected_scope[0:5] == "Dwarf" and self.dwarf is not None: # If Dwarf, try to autodetect the filter            
+            filter = self.dwarf.dwarf_shots_info.ir.strip().lower()
+            if "dual" in filter or "duo" in filter or "band" in filter or "narrow" in filter:
+                self.filter_combo.setCurrentText(new_options[1]) # It seems to be Dual Band Filter
+                self.siril.log(
+                    "Dual Band Filter detected",
+                    LogColor.BLUE,
+                )
 
         # Disable SPCC for Celestron Origin
         if selected_scope == "Celestron Origin":
@@ -2812,6 +2824,16 @@ class PreprocessingInterface(QMainWindow):
         except Exception as e:
             self.siril.log(f"Failed to load presets: {e}", LogColor.RED)
 
+    def load_dwarf(self, directory: str) -> bool:
+        if not os.path.exists(Path(os.path.join(directory, "shotsInfo.json"))):
+            self.siril.log("PAS DWARF LOADED", LogColor.RED)
+            self.dwarf = None
+            return False
+        self.siril.log("DWARF LOADED :)", LogColor.GREEN)
+        self.dwarf = DwarfManager(directory, self.siril)
+
+        return True
+
 @dataclass
 class DwarfShotsInfo:
     target: str
@@ -2837,14 +2859,14 @@ class DwarfDarkMeta:
     binning: int
     temp_c: int
     
-class DwarfUtils: 
+class DwarfManager: 
     # This class encapsulates code initially created by DeepSkyLab for his "DWARF Mini One‑Click Preprocess for Siril" script
     # https://youtu.be/GnNZ2issC-Y
 
     def __init__(self, workdir: str, siril):
         self.siril = siril
         self.current_folder = Path(workdir)
-        self.dwarfShotsInfo = self._read_shotsinfo(Path(os.path.join(self.current_folder, "shotsInfo.json")))
+        self.dwarf_shots_info = self._read_shotsinfo(Path(os.path.join(self.current_folder, "shotsInfo.json")))
         self._DARK_RE = re.compile(
             r"dark_exp_(?P<exp>[0-9]+\.?[0-9]*)_gain_(?P<gain>[0-9]+)_bin_(?P<bin>[0-9]+)_(?P<temp>[0-9]+)C",
             re.IGNORECASE,
@@ -2920,7 +2942,6 @@ class DwarfUtils:
             return 0
         return None
 
-
     def _pick_best_calib_subfolder(self, parent: Path, cam_name: str, ir_code: Optional[int], gain: int) -> Optional[Path]:
         """Pick best matching subfolder in CALI_FRAME/{bias|flat}."""
         if not parent.is_dir():
@@ -2973,7 +2994,7 @@ class DwarfUtils:
         return sorted(set(out))
 
     def _select_matching_darks(self, dark_dir: Path) -> List[Path]:
-        shots = self.dwarfShotsInfo
+        shots = self.dwarf_shots_info
         files = self._glob_fits(dark_dir)
         if not files:
             return []
