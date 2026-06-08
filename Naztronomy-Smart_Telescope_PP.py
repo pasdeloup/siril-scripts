@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 
 Naztronomy - Smart Telescope Preprocessing script
-Version: 2.0.6
+Version: 2.0.7
 =====================================
 
 The author of this script is Nazmus Nasir (Naztronomy) and can be reached at:
@@ -25,15 +25,16 @@ The following subdirectories are optional:
 """
 CHANGELOG:
 
+2.0.7 - Refactored directory selection for better maintainability
 2.0.6 - Ignore dot files from macs
       - Fix black frames check bug
       - PR#75 - support compressed fits in lights dir
       - Refactored UI code for better maintainability
       - Allow safe cancellation of processing
-      - Added safe deletes 
+      - Added safe deletes
       - Added stack weighting option (Noise, Number of Stars, Weighted FWHM)
       - Max batch size of 8100 on Windows but default in UI is still 2000 until version is readable by Python OR feature becomes permanent
-      - Added Dwarf II in telescope name along with DWARFII. 
+      - Added Dwarf II in telescope name along with DWARFII.
 2.0.5 - Bugfix: Black Frames Scan now sees both compressed and uncompressed fits
       - Bugfix: Compression turned on at batch instead of run code
 2.0.4 - Compression is now an optional checkbox
@@ -49,7 +50,7 @@ CHANGELOG:
       - Updated and more Tooltips
       - Output stacking details
       - Fixed max frames bug for linux and mac
-      - Updated tolerance for BGE 
+      - Updated tolerance for BGE
       - Add Dwarf Mini Support
 2.0.2 - Small Bug fixes
       - Reenable feathering
@@ -74,7 +75,7 @@ CHANGELOG:
       - Allow changing batch size
       - Accepts master calibration frames (also creates master calibration frames)
       - Temporary workaround to cfa debayering bug in Siril when using drizzle and background extraction for seestars
-1.1.1 - Bug fixes: 
+1.1.1 - Bug fixes:
       - Fixed Celestron Origin focal length to 335mm
       - Fixed clean up for pre-pp files
 1.1.0 - Minor version update:
@@ -324,53 +325,7 @@ class PreprocessingInterface(QMainWindow):
 
         self.initial_message()
 
-        changed_cwd = False  # a way not to run the prompting loop
-        initial_cwd = os.path.join(self.current_working_directory, "lights")
-        if os.path.isdir(initial_cwd):
-            self.siril.log(
-                f"Current working directory is valid: {self.current_working_directory}",
-                LogColor.GREEN,
-            )
-            self.siril.cmd("cd", f'"{self.current_working_directory}"')
-            self.cwd_label_text = (
-                f"Current working directory: {self.current_working_directory}"
-            )
-            changed_cwd = True
-        elif os.path.basename(self.current_working_directory.lower()) == "lights":
-            msg = "You're currently in the 'lights' directory, do you want to select the parent directory?"
-            answer = QMessageBox.question(self, "Already in Lights Dir", msg)
-            if answer == QMessageBox.StandardButton.Yes:
-                self.siril.cmd("cd", "../")
-                os.chdir(os.path.dirname(self.current_working_directory))
-                self.current_working_directory = os.path.dirname(
-                    self.current_working_directory
-                )
-                self.cwd_label_text = (
-                    f"Current working directory: {self.current_working_directory}"
-                )
-                self.siril.log(
-                    f"Updated current working directory to: {self.current_working_directory}",
-                    LogColor.GREEN,
-                )
-                changed_cwd = True
-            else:
-                self.siril.log(
-                    f"Current working directory is invalid: {self.current_working_directory}, reprompting...",
-                    LogColor.SALMON,
-                )
-                changed_cwd = False
-        elif self.load_dwarf(self.current_working_directory):
-            msg = "You don't have 'lights' directory, but I've found a shotsinfo.json so you may be using a DWARF Telescope, do you want me to try to create the 'lights' directory for you and put your fits files in it?"
-            answer = QMessageBox.question(self, "Copy Dwarf fits into Lights Dir", msg)
-            if answer == QMessageBox.StandardButton.Yes:                
-                self.dwarf.create_lights_folder()
-                changed_cwd = True
-            else:
-                self.siril.log(
-                    f"Current working directory is invalid: {self.current_working_directory}, reprompting...",
-                    LogColor.SALMON,
-                )
-                changed_cwd = False
+        changed_cwd = self.check_directory(self.current_working_directory, True)  # a way not to run the prompting loop
 
         if not changed_cwd:
             while True:
@@ -394,65 +349,10 @@ class PreprocessingInterface(QMainWindow):
                     self.close()
                     return  # Stop initialization completely
 
-                lights_directory = os.path.join(selected_dir, "lights")
-                if os.path.isdir(lights_directory):
-                    self.siril.cmd("cd", f'"{selected_dir}"')
-                    os.chdir(selected_dir)
-                    self.current_working_directory = selected_dir
-                    self.cwd_label_text = f"Current working directory: {selected_dir}"
-                    self.siril.log(
-                        f"Updated current working directory to: {selected_dir}",
-                        LogColor.GREEN,
-                    )
+                if self.check_directory(selected_dir):
                     break
-
-                elif os.path.basename(selected_dir.lower()) == "lights":
-                    msg = "The selected directory is the 'lights' directory, do you want to select the parent directory?"
-                    answer = QMessageBox.question(
-                        self,
-                        "Already in Lights Dir",
-                        msg,
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    )
-                    if answer == QMessageBox.StandardButton.Yes:
-                        parent_dir = os.path.dirname(selected_dir)
-                        self.siril.cmd("cd", f'"{parent_dir}"')
-                        os.chdir(parent_dir)
-                        self.current_working_directory = parent_dir
-                        self.cwd_label_text = f"Current working directory: {parent_dir}"
-                        self.siril.log(
-                            f"Updated current working directory to: {parent_dir}",
-                            LogColor.GREEN,
-                        )
-                    break
-
-                elif self.load_dwarf(selected_dir):
-                    msg = "You don't have 'lights' directory, but I've found a shotsinfo.json so you may be using a DWARF Telescope, do you want me to try to create the 'lights' directory for you and put your fits files in it?"
-                    answer = QMessageBox.question(self, "Copy Dwarf fits into Lights Dir", msg)
-                    if answer == QMessageBox.StandardButton.Yes:                        
-                        self.dwarf.create_lights_folder()                        
-                        self.siril.cmd("cd", f'"{selected_dir}"')
-                        os.chdir(selected_dir)
-                        self.current_working_directory = selected_dir
-                        self.cwd_label_text = f"Current working directory: {selected_dir}"
-                        self.siril.log(
-                            f"Updated current working directory to: {selected_dir}",
-                            LogColor.GREEN,
-                        )                        
-                    break
-
-                else:
-                    msg = f"The selected directory must contain a subdirectory named 'lights'.\nYou selected: {selected_dir}. Please try again."
-                    self.siril.log(msg, LogColor.SALMON)
-                    QMessageBox.critical(
-                        self, "Invalid Directory", msg, QMessageBox.StandardButton.Ok
-                    )
-                    continue
-        # (Re)Load Dwarf info if available
-        self.load_dwarf(self.current_working_directory)
 
         self.create_widgets()
-
         # Initialize fits_files_count before creating widgets
         self.fits_files_count = 0
         self.set_telescope_from_fits()
@@ -460,12 +360,73 @@ class PreprocessingInterface(QMainWindow):
         # self.setup_shortcuts()
         self.initialization_successful = True
 
+    def confirm_selected_directory(self, directory: str):
+        self.siril.cmd("cd", f'"{directory}"')
+        os.chdir(directory)
+        self.current_working_directory = directory
+        self.cwd_label_text = f"Current working directory: {directory}"
+        if (directory == self.current_working_directory):
+            self.siril.log(
+                f"Current working directory is valid: {self.current_working_directory}",
+                LogColor.GREEN,
+            )
+        else:
+            self.siril.log(
+                f"Updated current working directory to: {directory}",
+                LogColor.GREEN,
+            )
+
+    def check_directory(self, directory: str, is_initial_dir=False) -> bool:
+        lights_directory = os.path.join(directory, "lights")
+        if os.path.isdir(lights_directory):
+            self.confirm_selected_directory(directory)
+            return True
+
+        elif os.path.basename(directory.lower()) == "lights":
+            msg = "The selected directory is the 'lights' directory, do you want to select the parent directory?"
+            answer = QMessageBox.question(
+                self,
+                "Already in Lights Dir",
+                msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                parent_dir = os.path.dirname(directory)
+                self.confirm_selected_directory(parent_dir)
+            return True
+        elif is_initial_dir:
+            self.siril.log(
+                f"Current working directory is invalid: {directory}, reprompting...",
+                LogColor.SALMON,
+            )
+            return False
+        elif self.load_dwarf(directory):
+            msg = "You don't have 'lights' directory, but I've found a shotsinfo.json so you may be using a DWARF Telescope, do you want me to try to create the 'lights' directory for you and put your fits files in it?"
+            file_number = 0
+            answer = QMessageBox.question(self, "Copy Dwarf fits into Lights Dir", msg)
+            if answer == QMessageBox.StandardButton.Yes:
+                file_number = self.dwarf.create_lights_folder()
+            if file_number > 0:
+                self.confirm_selected_directory(directory)
+                return True
+            self.siril.log(
+                f"Current working directory is invalid: {directory}, reprompting...",
+                LogColor.SALMON,
+            )
+
+        msg = f"The selected directory must contain a subdirectory named 'lights'.\nYou selected: {directory}. Please try again."
+        self.siril.log(msg, LogColor.SALMON)
+        QMessageBox.critical(
+            self, "Invalid Directory", msg, QMessageBox.StandardButton.Ok
+        )
+        return False
+
     def initial_message(self):
         msg = f"""Welcome to {APP_NAME} v{VERSION}!
         Please watch latest demos on https://youtube.com/Naztronomy which can answer most questions.
         Here are some Frequently Asked Questions:
         Q: Can it handle telescopes not listed in the dropdown?
-        A: Yes, but it will not mosaic them. It will do regular star registration. 
+        A: Yes, but it will not mosaic them. It will do regular star registration.
         Q: How do I get support?
         A: Join the Naztronomy Discord server for support and discussion. Please have your logs handy.
         Q: Where can I find the logs?
@@ -1371,7 +1332,7 @@ class PreprocessingInterface(QMainWindow):
         if new_options:
             self.filter_combo.setCurrentText(new_options[0])
 
-        if selected_scope[0:5] == "Dwarf" and self.dwarf is not None: # If Dwarf, try to autodetect the filter            
+        if selected_scope[0:5] == "Dwarf" and self.dwarf is not None: # If Dwarf, try to autodetect the filter
             filter = self.dwarf.dwarf_shots_info.ir.strip().lower()
             if "dual" in filter or "duo" in filter or "band" in filter or "narrow" in filter:
                 self.filter_combo.setCurrentText(new_options[1]) # It seems to be Dual Band Filter
@@ -2463,10 +2424,10 @@ class PreprocessingInterface(QMainWindow):
         )
         self.siril.log(
             """
-        Thank you for using the Naztronomy Smart Telescope Preprocessor! 
+        Thank you for using the Naztronomy Smart Telescope Preprocessor!
         The author of this script is Nazmus Nasir (Naztronomy).
-        Website: https://www.Naztronomy.com 
-        YouTube: https://www.YouTube.com/Naztronomy 
+        Website: https://www.Naztronomy.com
+        YouTube: https://www.YouTube.com/Naztronomy
         Discord: https://discord.gg/yXKqrawpjr
         Patreon: https://www.patreon.com/c/naztronomy
         Buy me a Coffee: https://www.buymeacoffee.com/naztronomy
@@ -2826,12 +2787,9 @@ class PreprocessingInterface(QMainWindow):
 
     def load_dwarf(self, directory: str) -> bool:
         if not os.path.exists(Path(os.path.join(directory, "shotsInfo.json"))):
-            self.siril.log("PAS DWARF LOADED", LogColor.RED)
             self.dwarf = None
             return False
-        self.siril.log("DWARF LOADED :)", LogColor.GREEN)
         self.dwarf = DwarfManager(directory, self.siril)
-
         return True
 
 @dataclass
@@ -2852,14 +2810,14 @@ class DwarfShotsInfo:
             return None
         return (self.min_temp + self.max_temp) / 2.0
 
-@dataclass    
+@dataclass
 class DwarfDarkMeta:
     exp_s: float
     gain: int
     binning: int
     temp_c: int
-    
-class DwarfManager: 
+
+class DwarfManager:
     # This class encapsulates code initially created by DeepSkyLab for his "DWARF Mini One‑Click Preprocess for Siril" script
     # https://youtu.be/GnNZ2issC-Y
 
@@ -2870,19 +2828,22 @@ class DwarfManager:
         self._DARK_RE = re.compile(
             r"dark_exp_(?P<exp>[0-9]+\.?[0-9]*)_gain_(?P<gain>[0-9]+)_bin_(?P<bin>[0-9]+)_(?P<temp>[0-9]+)C",
             re.IGNORECASE,
-        )        
+        )
         self._TEMP_SUFFIX_RE = re.compile(r".*_[+-]?\d+C\.(fit|fits|fts)$", re.IGNORECASE)
 
-    def _log(self, msg, color = LogColor.RED): 
+    def _log(self, msg, color = LogColor.RED):
         self.siril.log(msg, color)
 
-    def create_lights_folder(self):
+    def create_lights_folder(self) -> int:
         lights_directory = os.path.join(self.current_folder, "lights")
-        os.makedirs(lights_directory, exist_ok=True)        
         (light_files, _, _) = self._select_light_files()
+        if len(light_files) == 0:
+            return 0 # early return don't create the dir
+        os.makedirs(lights_directory, exist_ok=True)
         for light_file in light_files:
             shutil.copy2(light_file, lights_directory)
         self._log(f"{lights_directory} created, {len(light_files)} files copied in it", LogColor.GREEN)
+        return len(light_files)
 
     def _read_shotsinfo(self, shotsinfo_path: Path) -> DwarfShotsInfo:
         with shotsinfo_path.open("r", encoding="utf-8") as f:
@@ -2970,7 +2931,7 @@ class DwarfManager:
             return sc
 
         return sorted(candidates, key=score, reverse=True)[0]
-    
+
     def _parse_dark_filename(self, name: str) -> Optional[DwarfDarkMeta]:
         m = self._DARK_RE.search(name)
         if not m:
